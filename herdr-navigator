@@ -73,6 +73,8 @@ MOUSE_OFF = "\033[?1006l\033[?1000l"
 
 # screen row (1-based) -> tab_id, rebuilt on every paint so a click can be resolved
 ROW_TO_TAB: dict[int, str] = {}
+# tab_ids in render order, so up/down can walk the list
+TAB_ORDER: list[str] = []
 
 
 class Herdr:
@@ -136,7 +138,7 @@ def _walk_lists(obj, key):
     return []
 
 
-def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
+def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict, selected: str | None = None) -> str:
     """Render herdr's own navigator content for one workspace.
 
     `tab.list` already carries everything the navigator shows — per-tab `agent_status`,
@@ -163,6 +165,9 @@ def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
         lines.append("  (no tabs in this workspace)")
 
     ROW_TO_TAB.clear()
+    TAB_ORDER.clear()
+    for t in sorted(tabs, key=lambda x: x.get("number", 0)):
+        TAB_ORDER.append(t.get("tab_id", ""))
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
         status = t.get("agent_status") or "-"
         colour, glyph = DOT.get(status, ("\033[35m", "?"))
@@ -177,7 +182,10 @@ def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
         row = (prefix + body).rstrip()
         # +1 because terminal rows are 1-based and the header occupies row 1
         ROW_TO_TAB[len(lines) + 1] = t.get("tab_id", "")
-        if t.get("focused") and not plain:
+        is_sel = selected is not None and t.get("tab_id") == selected
+        if is_sel and not plain:
+            lines.append(f"{INVERT}{BOLD}{_fit(row.ljust(width), width)}{RESET}")
+        elif t.get("focused") and not plain:
             lines.append(f"{INVERT}{_fit(row.ljust(width), width)}{RESET}")
         else:
             lines.append(row if plain else f"{colour}{row}{RESET}")
@@ -190,7 +198,8 @@ def footer(cols: dict, plain: bool, width: int) -> str:
     """The two toggles, always visible, so the panel documents its own controls."""
     def mark(on: bool) -> str:
         return "on " if on else "off"
-    txt = f" click=go  [i] id {mark(cols['id'])}  [s] status {mark(cols['status'])}  [q] quit"
+    txt = (f" up/down+enter or click=go  [i] id {mark(cols['id'])}"
+           f"  [s] status {mark(cols['status'])}  [q] quit")
     txt = _fit(txt, width)
     return txt if plain else f"\033[7m{txt}\033[0m"
 
@@ -257,12 +266,13 @@ def main() -> int:
 
     stream = h.subscribe(SUBSCRIPTIONS)
     reader = stream.makefile("r", encoding="utf-8")
+    selected: str | None = None      # tab_id under the arrow-key cursor
 
     def paint():
         # \033[H\033[J — home + clear, so the pane behaves like a live panel
         sys.stdout.write("" if args.plain else "\033[H\033[J")
         w = shutil.get_terminal_size(fallback=(80, 24)).columns
-        print(render(h, ws, args.plain, cols), flush=True)
+        print(render(h, ws, args.plain, cols, selected), flush=True)
         if interactive:
             print(footer(cols, args.plain, w), end="", flush=True)
 
@@ -292,12 +302,21 @@ def main() -> int:
             if interactive and sys.stdin in ready:
                 ch = sys.stdin.read(1)
                 if ch == "\033":
-                    # An escape sequence: a mouse report, or a key we do not handle.
                     seq = _read_escape(sys.stdin)
-                    tab_id = _click_target(seq)
-                    if tab_id:
-                        h.call("tab.focus", {"tab_id": tab_id})
+                    if seq in ("[A", "[B"):            # up / down
+                        selected = _move(selected, -1 if seq == "[A" else 1)
                         paint()
+                    elif seq.startswith("[<"):          # a mouse report
+                        hit, inside = _click_target(seq)
+                        if hit:
+                            h.call("tab.focus", {"tab_id": hit})
+                            return 0                    # a popup: you clicked, you meant to go
+                        elif inside is False:
+                            return 0                    # clicked off the list — dismiss
+                elif ch in ("\r", "\n"):               # enter
+                    if selected:
+                        h.call("tab.focus", {"tab_id": selected})
+                        return 0
                 else:
                     key = ch.lower()
                     if key == "q":
@@ -349,21 +368,34 @@ def _read_escape(stream) -> str:
     return seq
 
 
-def _click_target(seq: str) -> str | None:
-    """Resolve an SGR mouse press into the tab_id on that screen row.
+def _move(selected: str | None, delta: int) -> str | None:
+    """Walk the rendered tab order. Starts at the top when nothing is selected yet."""
+    if not TAB_ORDER:
+        return None
+    if selected not in TAB_ORDER:
+        return TAB_ORDER[0 if delta > 0 else -1]
+    i = TAB_ORDER.index(selected) + delta
+    return TAB_ORDER[max(0, min(i, len(TAB_ORDER) - 1))]
 
-    SGR format is ESC [ < button ; col ; row M  (press) or m (release). Only button 0
-    presses count — a release would fire the same tab twice, and scroll buttons are 64+.
+
+def _click_target(seq: str) -> tuple[str | None, bool | None]:
+    """Resolve an SGR mouse press.
+
+    Returns (tab_id, landed_on_a_row). A press on a row gives its tab_id; a press
+    anywhere else in the popup gives (None, False) so the caller can dismiss. Anything
+    that is not a button-0 press gives (None, None) and is ignored — a release would
+    fire the same tab twice, and scroll buttons are 64+.
     """
     if not seq.startswith("[<") or not seq.endswith("M"):
-        return None
+        return None, None
     try:
         button, _col, row = seq[2:-1].split(";")
         if int(button) != 0:
-            return None
-        return ROW_TO_TAB.get(int(row))
-    except (ValueError, KeyError):
-        return None
+            return None, None
+        hit = ROW_TO_TAB.get(int(row))
+        return hit, hit is not None
+    except ValueError:
+        return None, None
 
 
 def _event_kind(ev: dict) -> str:

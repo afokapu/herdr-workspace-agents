@@ -60,6 +60,20 @@ Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
 
 Run it in a pane and it behaves like a panel — it clears and repaints on each event.
 
+## Getting to a tab
+
+```
+up / down    move the cursor
+enter        go to the selected tab, and close
+click a row  go to that tab, and close
+click off    dismiss without going anywhere
+q            dismiss
+```
+
+The cursor starts unset: the first `down` selects the top tab, the first `up` the bottom.
+It clamps at both ends rather than wrapping, so holding a key cannot cycle you past what you
+were aiming at.
+
 ## Click to switch
 
 Clicking a row focuses that tab. herdr forwards mouse events to a pane app that requests
