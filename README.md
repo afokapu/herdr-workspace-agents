@@ -94,6 +94,22 @@ away and the popup closes — which reads as "the arrow key dismissed it". `j`/`
 `h`/`l` are avoided for the same reason, and `i` is left alone because herdr's own agent
 filters use it.
 
+## Summary bar
+
+Above the tree, what needs you before where it is:
+
+```
+11 tabs · 12 panes  ●0 blocked  ◆2 working  ○5 idle  ✓2 done  ·3 other
+```
+
+Counted over **panes**, not tabs — a tab's status is an aggregate, so counting tabs would
+under-report a workspace where one tab holds three agents.
+
+The parts **sum to the pane count**, asserted in code. `other` exists because shell panes
+report `unknown`: a tally that quietly dropped the states it did not recognise would show 9
+of 12 and look complete. A zero is shown dimmed rather than hidden, because an absent count
+reads as "not measured".
+
 ## What it shows
 
 A tab→pane tree for the current workspace, mirroring herdr's own navigator:

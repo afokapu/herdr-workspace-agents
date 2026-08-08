@@ -167,7 +167,30 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
         head += f"   / {search}"
     if state:
         head += f"   [{state}]"
-    v.lines.append(head if plain else f"{BOLD}{head}{RESET}")
+    v.lines.append(_fit(head, width) if plain else f"{BOLD}{_fit(head, width)}{RESET}")
+
+    # SUMMARY — what needs you, before the detail of where it is. Counted over PANES, not
+    # tabs: a tab's status is an aggregate, so counting tabs would under-report a workspace
+    # where one tab holds three agents.
+    tally = {"blocked": 0, "working": 0, "idle": 0, "done": 0, "other": 0}
+    for p_ in panes:
+        st_ = p_.get("agent_status")
+        tally[st_ if st_ in tally else "other"] += 1
+    # The parts must SUM to the pane count. A tally that quietly drops the states it does
+    # not recognise (shell panes report "unknown") would show 9 of 12 and look complete.
+    assert sum(tally.values()) == len(panes)
+    parts = [f"{len(tabs)} tabs · {len(panes)} panes"]
+    for name in ("blocked", "working", "idle", "done", "other"):
+        colour_, glyph_ = DOT.get(name, ("\033[35m", "·"))
+        n = tally[name]
+        chunk = f"{glyph_}{n} {name}"
+        # Zero of something is worth showing dim rather than hiding — an absent count reads
+        # as "not measured", and today's whole programme is about that distinction.
+        parts.append(chunk if plain else
+                     (f"{colour_}{BOLD}{chunk}{RESET}" if n else f"{DIM}{chunk}{RESET}"))
+    summary = "  ".join(parts)
+    v.lines.append(_fit(summary, width) if plain else summary)
+    v.lines.append("─" * min(width, 200) if not plain else "-" * min(width, 200))
 
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
         tid = t.get("tab_id", "")
