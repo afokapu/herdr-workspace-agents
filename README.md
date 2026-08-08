@@ -60,41 +60,34 @@ Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
 
 Run it in a pane and it behaves like a panel — it clears and repaints on each event.
 
-## Getting to a tab
+## Keys
 
 ```
-up / down    move the cursor
-enter        go to the selected tab, and close
-click a row  go to that tab, and close
-click off    dismiss without going anywhere
-q            dismiss
+j / k / up / down   move
+enter               switch to the selected tab or pane
+click a row         switch to it
+click off the list  dismiss
+/                   search — type to filter, enter to keep, esc to clear
+b w i d a           filter by state: blocked, working, idle, done, all
+i / s / t           toggle the id, status and title columns
+esc / q             close
 ```
 
-The cursor starts unset: the first `down` selects the top tab, the first `up` the bottom.
-It clamps at both ends rather than wrapping, so holding a key cannot cycle you past what you
-were aiming at.
+## What it shows
 
-## Click to switch
-
-Clicking a row focuses that tab. herdr forwards mouse events to a pane app that requests
-them — its own config says so of `lazygit` and `btop` — so the navigator turns on SGR mouse
-reporting (`\033[?1006h`) and resolves the clicked screen row back to a `tab_id`, then calls
-`tab.focus`.
-
-Only button-0 presses count: a release would fire the same tab twice, and scroll is 64+.
-
-## Choosing columns
-
-Three fields, each toggleable live or from the command line:
+A tab→pane tree for the current workspace, mirroring herdr's own navigator:
 
 ```
-[i] pane id     [s] status     [t] title     [q] quit
+🍋 #1670 lifecycle execution  (wY)
+→◆ 1  wY:t1   orch #1670 token-proves-gates-passed             1 panes
+ ◆├─◆ p15  orch #1670 token-proves-gates-passed        claude · working
+ ○ 17 wY:tH   #1653 pr1660 state-object-rename-rejects...      1 panes
+  ├─○ pK   #1653 pr1660 state-object-rename-rejects...   claude · idle
 ```
 
-The toggles are shown in a footer at the bottom of the pane, so the panel documents its own
-controls. To start with a column hidden: `--no-id`, `--no-status`, `--no-title`.
-
-Keys need a tty. Piped or redirected, the flags are the whole interface.
+`→` marks the focused tab, `◆` the focused pane. The right margin carries the pane count
+for a tab and `agent · status` for a pane. Searching keeps a tab whose *panes* match, so
+filtering never orphans a result from its parent.
 
 ## Status glyphs
 

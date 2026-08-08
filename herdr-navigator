@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""herdr-navigator — herdr's workspace navigator, in a pane.
+"""herdr-navigator — herdr's workspace navigator, scoped to one workspace, in a pane.
 
-herdr 0.7.4's socket API has no view/filter concept — the complete `agent.*` surface is
-explain/focus/get/list/read/rename/send/start, and `agent.list` takes EmptyParams. So a
-"sidebar showing only the current workspace" cannot be requested from the server. It can,
-however, be *derived*: `events.subscribe` is a real push stream, and `workspace.focused` is
-one of its event kinds.
+herdr 0.7.4's own navigator spans every workspace. Its socket API has no filter: the
+complete `agent.*` surface is explain/focus/get/list/read/rename/send/start, `agent.list`
+takes EmptyParams, and there is no `agent.view.*` method. So a workspace-scoped navigator
+cannot be requested — it has to be derived, which is what this does.
 
-This subscribes to the events that change the answer, re-reads `agent.list` when one
-arrives, and prints only the agents in the focused workspace. No polling.
+`events.subscribe` is a real push stream carrying `workspace.focused`, so the view
+re-scopes itself when you switch workspaces. No polling.
 
 Usage:
     herdr-navigator                 # follow the focused workspace
@@ -16,11 +15,8 @@ Usage:
     herdr-navigator --once          # print once and exit
     herdr-navigator --plain         # no ANSI, for piping
 
-Live keys: [i] pane id  [s] status  [t] title  [q] quit
-
-Verified against herdr 0.7.4. If `events.subscribe` returns an error naming a missing
-field, the Subscription shape changed: run `herdr api schema --json` and check which
-variants still require no arguments.
+Keys:  j/k or up/down move   enter switch   / search   b/w/i/d/a states   esc, q close
+       i/s/t toggle the pane-id, status and title columns
 """
 
 from __future__ import annotations
@@ -35,18 +31,13 @@ import sys
 import termios
 import tty
 
-# herdr has no subscribable agent.* event: the Subscription enum covers workspace.*,
-# worktree.*, tab.*, pane.* and layout.updated only, and the per-pane variants need a
-# pane_id. So `agent.rename` — and anything else that changes agent metadata without
-# touching a pane — arrives through no event at all. This is the floor that catches it.
-# It is a safety net, not the mechanism: events still drive the fast path.
+# herdr has no subscribable agent.* event — the Subscription enum covers workspace.*,
+# worktree.*, tab.* and pane.* only, and the per-pane variants need a pane_id. So
+# `agent.rename` reaches us through no event at all. This is the floor that catches it.
 FALLBACK_REPAINT_SECONDS = 20
 
 SOCKET = os.environ.get("HERDR_SOCK", os.path.expanduser("~/.config/herdr/herdr.sock"))
 
-# Only variants that require no arguments — the per-pane ones (agent_status_changed,
-# scroll_changed, output_matched) demand a pane_id, which would mean re-subscribing every
-# time a pane is created. `pane.updated` covers status changes globally.
 SUBSCRIPTIONS = [
     {"type": "workspace.focused"},
     {"type": "pane.updated"},
@@ -54,32 +45,26 @@ SUBSCRIPTIONS = [
     {"type": "pane.closed"},
     {"type": "pane.exited"},
     {"type": "tab.renamed"},
+    {"type": "tab.created"},
+    {"type": "tab.closed"},
 ]
 
 DOT = {
-    "working": ("\033[32m", "●"),   # green
-    "blocked": ("\033[31m", "◉"),   # red   — wants an answer
-    "idle":    ("\033[33m", "○"),   # yellow
-    "done":    ("\033[90m", "✓"),   # grey
+    "working": ("\033[32m", "◆"),
+    "blocked": ("\033[31m", "●"),
+    "idle":    ("\033[33m", "○"),
+    "done":    ("\033[90m", "✓"),
 }
-RESET = "\033[0m"
-BOLD = "\033[1m"
-INVERT = "\033[7m"
+RESET, BOLD, DIM, INVERT = "\033[0m", "\033[1m", "\033[2m", "\033[7m"
+ACCENT = "\033[38;5;215m"          # amber, matching herdr's own selection bar
 
-# SGR mouse reporting (1006) with button tracking (1000). herdr forwards mouse to a pane
-# app that asks for it — the config says so of lazygit and btop, and the same holds here.
 MOUSE_ON = "\033[?1000h\033[?1006h"
 MOUSE_OFF = "\033[?1006l\033[?1000l"
 
-# screen row (1-based) -> tab_id, rebuilt on every paint so a click can be resolved
-ROW_TO_TAB: dict[int, str] = {}
-# tab_ids in render order, so up/down can walk the list
-TAB_ORDER: list[str] = []
+STATE_KEYS = {"b": "blocked", "w": "working", "i": "idle", "d": "done", "a": None}
 
 
 class Herdr:
-    """One connection per request. herdr replies newline-delimited."""
-
     def __init__(self, path: str = SOCKET) -> None:
         self.path = path
 
@@ -88,8 +73,8 @@ class Herdr:
         s.settimeout(timeout)
         try:
             s.connect(self.path)
-            req = {"id": method, "method": method, "params": params or {}}
-            s.sendall((json.dumps(req) + "\n").encode())
+            s.sendall((json.dumps({"id": method, "method": method,
+                                   "params": params or {}}) + "\n").encode())
             buf = b""
             while b"\n" not in buf:
                 chunk = s.recv(65536)
@@ -103,182 +88,245 @@ class Herdr:
     def subscribe(self, subs: list[dict]) -> socket.socket:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(self.path)
-        req = {"id": "sub", "method": "events.subscribe", "params": {"subscriptions": subs}}
-        s.sendall((json.dumps(req) + "\n").encode())
-        ack = s.makefile("r", encoding="utf-8").readline()
-        parsed = json.loads(ack or "{}")
-        if "error" in parsed:
-            raise RuntimeError(f"events.subscribe refused: {parsed['error']}")
+        s.sendall((json.dumps({"id": "sub", "method": "events.subscribe",
+                               "params": {"subscriptions": subs}}) + "\n").encode())
+        ack = json.loads(s.makefile("r", encoding="utf-8").readline() or "{}")
+        if "error" in ack:
+            raise RuntimeError(f"events.subscribe refused: {ack['error']}")
         return s
 
 
-def focused_workspace(h: Herdr) -> str | None:
-    """The workspace herdr currently considers focused, or None if it cannot be read."""
-    r = h.call("workspace.list")
-    for ws in _walk_lists(r, "workspaces"):
-        if ws.get("focused"):
-            return ws.get("workspace_id")
-    return None
-
-
-def _walk_lists(obj, key):
+def _walk(obj, key):
     """herdr nests its payloads; find the first list stored under `key`."""
     if isinstance(obj, dict):
         if key in obj and isinstance(obj[key], list):
             return obj[key]
         for v in obj.values():
-            found = _walk_lists(v, key)
+            found = _walk(v, key)
             if found:
                 return found
     elif isinstance(obj, list):
         for v in obj:
-            found = _walk_lists(v, key)
+            found = _walk(v, key)
             if found:
                 return found
     return []
 
 
-def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict, selected: str | None = None) -> str:
-    """Render herdr's own navigator content for one workspace.
+def focused_workspace(h: Herdr) -> str | None:
+    for ws in _walk(h.call("workspace.list"), "workspaces"):
+        if ws.get("focused"):
+            return ws.get("workspace_id")
+    return None
 
-    `tab.list` already carries everything the navigator shows — per-tab `agent_status`,
-    `label`, `number`, `focused`, `pane_count` — so this ports that rather than
-    reconstructing it from `agent.list`. One call instead of three, and the label is the
-    operator's own tab name rather than an agent name a worker's tooling may overwrite.
-    """
+
+class View:
+    """Everything the navigator draws, and the rows a key or click can act on."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.targets: list[dict] = []     # one per selectable row, in render order
+        self.row_of: dict[int, int] = {}  # screen row (1-based) -> index into targets
+
+
+def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
+          state: str | None, selected: int, plain: bool, width: int) -> View:
+    v = View()
     if ws_id is None:
-        return "workspace: COULD-NOT-READ - showing nothing rather than everything"
+        v.lines = ["workspace: COULD-NOT-READ - showing nothing rather than everything"]
+        return v
 
     label = ws_id
-    for ws in _walk_lists(h.call("workspace.list"), "workspaces"):
+    for ws in _walk(h.call("workspace.list"), "workspaces"):
         if ws.get("workspace_id") == ws_id:
             label = ws.get("label") or ws_id
             break
 
-    tabs = [t for t in _walk_lists(h.call("tab.list", {"workspace_id": ws_id}), "tabs")
+    tabs = [t for t in _walk(h.call("tab.list", {"workspace_id": ws_id}), "tabs")
             if t.get("workspace_id") == ws_id]
+    panes = [p for p in _walk(h.call("pane.list", {"workspace_id": ws_id}), "panes")
+             if p.get("workspace_id") == ws_id]
+    by_tab: dict[str, list[dict]] = {}
+    for p in panes:
+        by_tab.setdefault(p.get("tab_id", ""), []).append(p)
 
-    width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    header = _fit(f"{label}  ({ws_id})  {len(tabs)} tabs", width)
-    lines = [header if plain else f"{BOLD}{header}{RESET}"]
-    if not tabs:
-        lines.append("  (no tabs in this workspace)")
+    def keep(text: str, st: str | None) -> bool:
+        if search and search.lower() not in text.lower():
+            return False
+        if state and st != state:
+            return False
+        return True
 
-    ROW_TO_TAB.clear()
-    TAB_ORDER.clear()
+    # header + search line, mirroring herdr's own chrome
+    head = f"{label}  ({ws_id})"
+    if search:
+        head += f"   / {search}"
+    if state:
+        head += f"   [{state}]"
+    v.lines.append(head if plain else f"{BOLD}{head}{RESET}")
+
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
-        TAB_ORDER.append(t.get("tab_id", ""))
-    for t in sorted(tabs, key=lambda x: x.get("number", 0)):
-        status = t.get("agent_status") or "-"
-        colour, glyph = DOT.get(status, ("\033[35m", "?"))
-        here = ">" if t.get("focused") else " "
-        # The tab number is how you switch to it, so it is never dropped.
-        prefix = f"{here}{glyph} {t.get('number','?'):<2} "
+        tid = t.get("tab_id", "")
+        kids = sorted(by_tab.get(tid, []), key=lambda x: x.get("pane_id", ""))
+        tab_text = f"{t.get('number','?')} {tid} {t.get('label') or ''}"
+        shown = [p for p in kids
+                 if keep(f"{p.get('pane_id','')} {p.get('label') or p.get('name') or ''}",
+                         p.get("agent_status"))]
+        # a tab survives if it matches, or if any of its panes do
+        if not keep(tab_text, t.get("agent_status")) and not shown:
+            continue
+
+        v.targets.append({"kind": "tab", "id": tid,
+                          "focus": {"tab_id": tid}, "label": t.get("label") or tid})
+        v.row_of[len(v.lines) + 1] = len(v.targets) - 1
+        st = t.get("agent_status") or "-"
+        colour, glyph = DOT.get(st, ("\033[35m", "·"))
+        here = "→" if t.get("focused") else " "
+        left = f"{here}{glyph} "
         if cols["id"]:
-            prefix += f"{t.get('tab_id',''):<7} "
-        if cols["status"]:
-            prefix += f"{status:<7} "
-        body = _fit_title(t.get("label") or "", max(4, width - len(prefix))) if cols["title"] else ""
-        row = (prefix + body).rstrip()
-        # +1 because terminal rows are 1-based and the header occupies row 1
-        ROW_TO_TAB[len(lines) + 1] = t.get("tab_id", "")
-        is_sel = selected is not None and t.get("tab_id") == selected
-        if is_sel and not plain:
-            lines.append(f"{INVERT}{BOLD}{_fit(row.ljust(width), width)}{RESET}")
-        elif t.get("focused") and not plain:
-            lines.append(f"{INVERT}{_fit(row.ljust(width), width)}{RESET}")
-        else:
-            lines.append(row if plain else f"{colour}{row}{RESET}")
-        if status == "blocked":
-            lines.append(_fit("      ^ waiting on you", width))
-    return "\n".join(lines)
+            left += f"{t.get('number','?'):<2} {tid:<7} "
+        right = f"{len(kids)} panes"
+        v.lines.append(_row(left, t.get("label") or "", right, width,
+                            plain, colour, len(v.targets) - 1 == selected,
+                            bold=True))
+
+        for p in (shown if (search or state) else kids):
+            pid = p.get("pane_id", "")
+            v.targets.append({"kind": "pane", "id": pid,
+                              "focus": {"pane_id": pid},
+                              "label": p.get("label") or p.get("name") or pid})
+            v.row_of[len(v.lines) + 1] = len(v.targets) - 1
+            pst = p.get("agent_status") or "-"
+            pcol, pglyph = DOT.get(pst, ("\033[35m", "·"))
+            mark = "◆" if p.get("focused") else " "
+            left = f" {mark}├─{pglyph} "
+            if cols["id"]:
+                left += f"{pid.split(':')[-1]:<4} "
+            name = p.get("label") or p.get("name") or p.get("terminal_title_stripped") or ""
+            agent = p.get("agent") or "shell"
+            right = f"{agent} · {pst}" if cols["status"] else agent
+            v.lines.append(_row(left, name if cols["title"] else "", right, width,
+                                plain, pcol, len(v.targets) - 1 == selected))
+    if not v.targets:
+        v.lines.append("  (nothing matches)")
+    return v
 
 
-def footer(cols: dict, plain: bool, width: int) -> str:
-    """The two toggles, always visible, so the panel documents its own controls."""
-    def mark(on: bool) -> str:
-        return "on " if on else "off"
-    txt = (f" up/down+enter or click=go  [i] id {mark(cols['id'])}"
-           f"  [s] status {mark(cols['status'])}  [q] quit")
-    txt = _fit(txt, width)
-    return txt if plain else f"\033[7m{txt}\033[0m"
+def _row(left: str, mid: str, right: str, width: int, plain: bool,
+         colour: str, is_sel: bool, bold: bool = False) -> str:
+    """left + title, with `right` pushed to the margin; title truncates, ids never do."""
+    room = width - len(left) - len(right) - 1
+    body = _fit_title(mid, max(0, room))
+    line = left + body + " " * max(1, room - len(body)) + right
+    line = line[:width]
+    if plain:
+        return line
+    if is_sel:
+        return f"{INVERT}{ACCENT}{line.ljust(width)}{RESET}"
+    return f"{colour}{left}{RESET}{BOLD if bold else ''}{body}{RESET}" \
+           f"{' ' * max(1, room - len(body))}{DIM}{right}{RESET}"
 
 
 def _fit(text: str, width: int) -> str:
-    """Hard-truncate so a row never wraps; three dots mark what was cut."""
     if width <= 3 or len(text) <= width:
         return text[:width] if width > 0 else ""
     return text[: width - 3] + "..."
 
 
 def _fit_title(title: str, width: int) -> str:
-    """Truncate a worker title, but never at the cost of its identifiers.
-
-    A title is `#<issue> pr<pr> <slug>`. The slug is prose; the two ids are the whole
-    point of glancing at the panel. So the ids are held back and only the slug is cut —
-    which means a very narrow pane still answers "which issue, which PR".
-    """
+    """Truncate a title without losing its identifiers: `#<issue> pr<pr>` is held back."""
     if len(title) <= width:
         return title
-
     head, _, tail = title.partition(" ")
     ids = head
     if tail.startswith(("pr", "PR")):
         pr, _, rest = tail.partition(" ")
-        ids = f"{head} {pr}"
-        tail = rest
-    else:
-        tail = tail
-
-    if len(ids) >= width:          # not even the ids fit — cut them, still marked
+        ids, tail = f"{head} {pr}", rest
+    if len(ids) >= width:
         return _fit(ids, width)
-    if len(ids) + 4 > width:       # ids fit but nothing meaningful of the slug does
+    if len(ids) + 4 > width:
         return ids
     return ids + " " + _fit(tail, width - len(ids) - 1)
 
 
+def footer(cols: dict, state: str | None, plain: bool, width: int) -> str:
+    txt = (" enter switch   / search   b/w/i/d/a states   j/k move   esc close"
+           f"   [i]{'+' if cols['id'] else '-'}id"
+           f" [s]{'+' if cols['status'] else '-'}status")
+    txt = _fit(txt, width)
+    return txt if plain else f"{INVERT}{txt.ljust(width)}{RESET}"
+
+
+def _read_escape(stream) -> str:
+    seq = ""
+    for _ in range(32):
+        r, _, _ = select.select([stream], [], [], 0.05)
+        if not r:
+            break
+        c = stream.read(1)
+        seq += c
+        if c in "Mm~" or (seq.startswith("[") and c.isalpha() and c != "<"):
+            break
+    return seq
+
+
+def _click_row(seq: str) -> tuple[int | None, bool]:
+    """(screen_row, was_a_button0_press). Row is None for anything else."""
+    if not seq.startswith("[<") or not seq.endswith("M"):
+        return None, False
+    try:
+        button, _col, row = seq[2:-1].split(";")
+        return (int(row), True) if int(button) == 0 else (None, False)
+    except ValueError:
+        return None, False
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="herdr-navigator", description="herdr's workspace navigator, in a pane.")
-    ap.add_argument("--workspace", help="pin to this workspace id instead of following focus")
-    ap.add_argument("--once", action="store_true", help="print once and exit")
-    ap.add_argument("--plain", action="store_true", help="no ANSI colour")
-    ap.add_argument("--no-id", action="store_true", help="start with the pane id hidden")
-    ap.add_argument("--no-status", action="store_true", help="start with the status hidden")
-    ap.add_argument("--no-title", action="store_true", help="start with the title hidden")
+    ap = argparse.ArgumentParser(prog="herdr-navigator",
+                                 description="herdr's workspace navigator, in a pane.")
+    ap.add_argument("--workspace")
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--plain", action="store_true")
+    ap.add_argument("--no-id", action="store_true")
+    ap.add_argument("--no-status", action="store_true")
+    ap.add_argument("--no-title", action="store_true")
     args = ap.parse_args()
 
     cols = {"id": not args.no_id, "status": not args.no_status, "title": not args.no_title}
-
     h = Herdr()
     try:
         h.call("workspace.list", timeout=2.0)
     except (OSError, json.JSONDecodeError) as exc:
         print(f"cannot reach herdr at {SOCKET}: {exc}", file=sys.stderr)
-        print("is herdr running? override with HERDR_SOCK=", file=sys.stderr)
         return 1
 
     pinned = args.workspace
     ws = pinned or focused_workspace(h)
+    search, state, selected = "", None, 0
+    searching = False
 
     if args.once:
-        print(render(h, ws, args.plain, cols))
+        w = shutil.get_terminal_size(fallback=(80, 24)).columns
+        print("\n".join(build(h, ws, cols, search, state, -1, args.plain, w).lines))
         return 0
 
     stream = h.subscribe(SUBSCRIPTIONS)
     reader = stream.makefile("r", encoding="utf-8")
-    selected: str | None = None      # tab_id under the arrow-key cursor
+    view = View()
 
     def paint():
-        # \033[H\033[J — home + clear, so the pane behaves like a live panel
+        nonlocal view, selected
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        view = build(h, ws, cols, search, state, selected, args.plain, size.columns)
+        selected = max(0, min(selected, len(view.targets) - 1)) if view.targets else 0
         sys.stdout.write("" if args.plain else "\033[H\033[J")
-        w = shutil.get_terminal_size(fallback=(80, 24)).columns
-        print(render(h, ws, args.plain, cols, selected), flush=True)
+        body = view.lines[: max(1, size.lines - 2)]
+        print("\n".join(body), flush=True)
         if interactive:
-            print(footer(cols, args.plain, w), end="", flush=True)
+            prompt = f"/ {search}" if searching else footer(cols, state, args.plain, size.columns)
+            print(prompt, end="", flush=True)
 
-    # Raw mode lets a single keypress toggle a column. Only when stdin is a real tty —
-    # piped or redirected, the flags are the whole interface.
-    interactive = sys.stdin.isatty() and not args.once
+    interactive = sys.stdin.isatty()
     saved = None
     if interactive:
         try:
@@ -289,56 +337,82 @@ def main() -> int:
         except (termios.error, ValueError):
             interactive = False
 
+    def go(idx: int) -> bool:
+        if 0 <= idx < len(view.targets):
+            h.call("pane.focus" if view.targets[idx]["kind"] == "pane" else "tab.focus",
+                   view.targets[idx]["focus"])
+            return True
+        return False
+
     paint()
     try:
         while True:
-            # Block on the event stream and the keyboard together, waking on the fallback
-            # so anything herdr emits no event for (agent renames) still converges.
             watch = [stream] + ([sys.stdin] if interactive else [])
             ready, _, _ = select.select(watch, [], [], FALLBACK_REPAINT_SECONDS)
             if not ready:
                 paint()
                 continue
+
             if interactive and sys.stdin in ready:
                 ch = sys.stdin.read(1)
-                if ch == "\033":
+
+                if searching:                         # typing a filter
+                    if ch in ("\r", "\n"):
+                        searching = False
+                    elif ch == "\033":
+                        _read_escape(sys.stdin)
+                        searching, search = False, ""
+                    elif ch in ("\x7f", "\b"):
+                        search = search[:-1]
+                    elif ch.isprintable():
+                        search += ch
+                    selected = 0
+                    paint()
+                elif ch == "\033":
                     seq = _read_escape(sys.stdin)
-                    if seq in ("[A", "[B"):            # up / down
-                        selected = _move(selected, -1 if seq == "[A" else 1)
-                        paint()
-                    elif seq.startswith("[<"):          # a mouse report
-                        hit, inside = _click_target(seq)
-                        if hit:
-                            h.call("tab.focus", {"tab_id": hit})
-                            return 0                    # a popup: you clicked, you meant to go
-                        elif inside is False:
-                            return 0                    # clicked off the list — dismiss
-                elif ch in ("\r", "\n"):               # enter
-                    if selected:
-                        h.call("tab.focus", {"tab_id": selected})
+                    if seq == "":                     # bare ESC closes
                         return 0
-                else:
-                    key = ch.lower()
-                    if key == "q":
-                        return 0
-                    if key in ("i", "s", "t"):
-                        cols[{"i": "id", "s": "status", "t": "title"}[key]] ^= True
+                    if seq in ("[A", "[B"):
+                        selected += -1 if seq == "[A" else 1
                         paint()
+                    elif seq.startswith("[<"):
+                        row, pressed = _click_row(seq)
+                        if pressed:
+                            idx = view.row_of.get(row or -1)
+                            if idx is not None and go(idx):
+                                return 0
+                            return 0                  # clicked off the list: dismiss
+                elif ch in ("\r", "\n"):
+                    if go(selected):
+                        return 0
+                elif ch == "/":
+                    searching, search = True, ""
+                    paint()
+                elif ch in ("j", "k"):
+                    selected += 1 if ch == "j" else -1
+                    paint()
+                elif ch in STATE_KEYS:
+                    state = STATE_KEYS[ch]
+                    selected = 0
+                    paint()
+                elif ch == "q":
+                    return 0
+                elif ch in ("t",):
+                    cols["title"] ^= True
+                    paint()
                 if stream not in ready:
                     continue
+
             line = reader.readline()
             if not line:
-                print("\nevent stream ended", file=sys.stderr)
                 return 1
-            line = line.strip()
-            if not line:
-                continue
             try:
-                ev = json.loads(line)
+                ev = json.loads(line.strip() or "{}")
             except json.JSONDecodeError:
-                continue  # a partial frame is not a reason to die
+                continue
             if _event_kind(ev) == "workspace_focused" and not pinned:
                 ws = _event_field(ev, "workspace_id") or ws
+                selected = 0
             paint()
     except KeyboardInterrupt:
         return 0
@@ -351,51 +425,6 @@ def main() -> int:
             sys.stdout.flush()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
         stream.close()
-    return 0
-
-
-def _read_escape(stream) -> str:
-    """Read the rest of an escape sequence. SGR mouse ends in M (press) or m (release)."""
-    seq = ""
-    for _ in range(32):                       # bounded: never block on a lone ESC
-        r, _, _ = select.select([stream], [], [], 0.05)
-        if not r:
-            break
-        c = stream.read(1)
-        seq += c
-        if c in "Mm~" or (seq.startswith("[") and c.isalpha() and c not in "<"):
-            break
-    return seq
-
-
-def _move(selected: str | None, delta: int) -> str | None:
-    """Walk the rendered tab order. Starts at the top when nothing is selected yet."""
-    if not TAB_ORDER:
-        return None
-    if selected not in TAB_ORDER:
-        return TAB_ORDER[0 if delta > 0 else -1]
-    i = TAB_ORDER.index(selected) + delta
-    return TAB_ORDER[max(0, min(i, len(TAB_ORDER) - 1))]
-
-
-def _click_target(seq: str) -> tuple[str | None, bool | None]:
-    """Resolve an SGR mouse press.
-
-    Returns (tab_id, landed_on_a_row). A press on a row gives its tab_id; a press
-    anywhere else in the popup gives (None, False) so the caller can dismiss. Anything
-    that is not a button-0 press gives (None, None) and is ignored — a release would
-    fire the same tab twice, and scroll buttons are 64+.
-    """
-    if not seq.startswith("[<") or not seq.endswith("M"):
-        return None, None
-    try:
-        button, _col, row = seq[2:-1].split(";")
-        if int(button) != 0:
-            return None, None
-        hit = ROW_TO_TAB.get(int(row))
-        return hit, hit is not None
-    except ValueError:
-        return None, None
 
 
 def _event_kind(ev: dict) -> str:
