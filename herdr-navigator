@@ -286,9 +286,16 @@ def _fold(view: "View", idx: int, collapsed: set[str], expand: bool | None) -> N
 
 
 def _read_escape(stream) -> str:
+    """Read the rest of an escape sequence after an ESC byte.
+
+    The FIRST byte gets a generous wait. A terminal delivers `ESC [ A` as one burst, but
+    not always in one read — with a 50ms window an arrow key could return "" here and be
+    mistaken for a lone ESC, which closed the popup instead of moving the cursor. A real
+    lone ESC still resolves in 200ms, which is imperceptible.
+    """
     seq = ""
-    for _ in range(32):
-        r, _, _ = select.select([stream], [], [], 0.05)
+    for i in range(32):
+        r, _, _ = select.select([stream], [], [], 0.2 if i == 0 else 0.05)
         if not r:
             break
         c = stream.read(1)
