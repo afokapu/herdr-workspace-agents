@@ -130,8 +130,10 @@ class View:
 
 
 def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
-          state: str | None, selected: int, plain: bool, width: int) -> View:
+          state: str | None, selected: int, plain: bool, width: int,
+          collapsed: set[str] | None = None) -> View:
     v = View()
+    collapsed = collapsed or set()
     if ws_id is None:
         v.lines = ["workspace: COULD-NOT-READ - showing nothing rather than everything"]
         return v
@@ -182,7 +184,10 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
         st = t.get("agent_status") or "-"
         colour, glyph = DOT.get(st, ("\033[35m", "·"))
         here = "→" if t.get("focused") else " "
-        left = f"{here}{glyph} "
+        # A tab with no panes gets a space, not a triangle: there is nothing to expand,
+        # and a triangle that does nothing is a lie about what the key will do.
+        tri = " " if not kids else ("▸" if tid in collapsed else "▾")
+        left = f"{here}{tri}{glyph} "
         if cols["id"]:
             left += f"{t.get('number','?'):<2} {tid:<7} "
         right = f"{len(kids)} panes"
@@ -190,9 +195,11 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
                             plain, colour, len(v.targets) - 1 == selected,
                             bold=True))
 
+        if tid in collapsed:
+            continue
         for p in (shown if (search or state) else kids):
             pid = p.get("pane_id", "")
-            v.targets.append({"kind": "pane", "id": pid,
+            v.targets.append({"kind": "pane", "id": pid, "parent": tid,
                               "focus": {"pane_id": pid},
                               "label": p.get("label") or p.get("name") or pid})
             v.row_of[len(v.lines) + 1] = len(v.targets) - 1
@@ -250,11 +257,32 @@ def _fit_title(title: str, width: int) -> str:
 
 
 def footer(cols: dict, state: str | None, plain: bool, width: int) -> str:
-    txt = (" enter switch   / search   b/w/i/d/a states   j/k move   esc close"
+    txt = (" enter switch   / search   b/w/i/d/a states   j/k move   h/l fold   z all"
            f"   [i]{'+' if cols['id'] else '-'}id"
            f" [s]{'+' if cols['status'] else '-'}status")
     txt = _fit(txt, width)
     return txt if plain else f"{INVERT}{txt.ljust(width)}{RESET}"
+
+
+def _fold(view: "View", idx: int, collapsed: set[str], expand: bool | None) -> None:
+    """Fold or unfold the tab at `idx`. On a pane row, act on its parent tab.
+
+    `expand=None` toggles. Acting on a pane's parent is what makes `h` useful from
+    anywhere in a subtree — otherwise you would have to navigate back up to collapse
+    the thing you are already inside.
+    """
+    if not (0 <= idx < len(view.targets)):
+        return
+    target = view.targets[idx]
+    tid = target["id"] if target["kind"] == "tab" else target.get("parent")
+    if not tid:
+        return
+    if expand is True:
+        collapsed.discard(tid)
+    elif expand is False:
+        collapsed.add(tid)
+    else:
+        collapsed.discard(tid) if tid in collapsed else collapsed.add(tid)
 
 
 def _read_escape(stream) -> str:
@@ -304,10 +332,11 @@ def main() -> int:
     ws = pinned or focused_workspace(h)
     search, state, selected = "", None, 0
     searching = False
+    collapsed: set[str] = set()
 
     if args.once:
         w = shutil.get_terminal_size(fallback=(80, 24)).columns
-        print("\n".join(build(h, ws, cols, search, state, -1, args.plain, w).lines))
+        print("\n".join(build(h, ws, cols, search, state, -1, args.plain, w, collapsed).lines))
         return 0
 
     stream = h.subscribe(SUBSCRIPTIONS)
@@ -317,7 +346,8 @@ def main() -> int:
     def paint():
         nonlocal view, selected
         size = shutil.get_terminal_size(fallback=(80, 24))
-        view = build(h, ws, cols, search, state, selected, args.plain, size.columns)
+        view = build(h, ws, cols, search, state, selected, args.plain, size.columns,
+                     collapsed)
         selected = max(0, min(selected, len(view.targets) - 1)) if view.targets else 0
         sys.stdout.write("" if args.plain else "\033[H\033[J")
         body = view.lines[: max(1, size.lines - 2)]
@@ -375,6 +405,9 @@ def main() -> int:
                     if seq in ("[A", "[B"):
                         selected += -1 if seq == "[A" else 1
                         paint()
+                    elif seq in ("[C", "[D"):        # right / left
+                        _fold(view, selected, collapsed, expand=(seq == "[C"))
+                        paint()
                     elif seq.startswith("[<"):
                         row, pressed = _click_row(seq)
                         if pressed:
@@ -390,6 +423,15 @@ def main() -> int:
                     paint()
                 elif ch in ("j", "k"):
                     selected += 1 if ch == "j" else -1
+                    paint()
+                elif ch in ("h", "l", " "):
+                    _fold(view, selected, collapsed,
+                          expand=None if ch == " " else (ch == "l"))
+                    paint()
+                elif ch == "z":                      # fold or unfold everything
+                    all_tabs = {t["id"] for t in view.targets if t["kind"] == "tab"}
+                    collapsed.clear() if collapsed else collapsed.update(all_tabs)
+                    selected = 0
                     paint()
                 elif ch in STATE_KEYS:
                     state = STATE_KEYS[ch]

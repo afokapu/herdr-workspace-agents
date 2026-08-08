@@ -68,6 +68,9 @@ enter               switch to the selected tab or pane
 click a row         switch to it
 click off the list  dismiss
 /                   search — type to filter, enter to keep, esc to clear
+h / l / left/right  fold / unfold the tab (from a pane row, its parent tab)
+space               toggle fold
+z                   fold everything, or unfold everything
 b w i d a           filter by state: blocked, working, idle, done, all
 i / s / t           toggle the id, status and title columns
 esc / q             close
@@ -85,7 +88,9 @@ A tab→pane tree for the current workspace, mirroring herdr's own navigator:
   ├─○ pK   #1653 pr1660 state-object-rename-rejects...   claude · idle
 ```
 
-`→` marks the focused tab, `◆` the focused pane. The right margin carries the pane count
+`▾` / `▸` show whether a tab is expanded; a tab with no panes gets neither, because a
+triangle that does nothing misdescribes what the key will do. `→` marks the focused tab,
+`◆` the focused pane. The right margin carries the pane count
 for a tab and `agent · status` for a pane. Searching keeps a tab whose *panes* match, so
 filtering never orphans a result from its parent.
 
