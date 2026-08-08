@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""herdr-feed — a live, workspace-scoped agent feed for herdr.
+"""herdr-navigator — herdr's workspace navigator, in a pane.
 
 herdr 0.7.4's socket API has no view/filter concept — the complete `agent.*` surface is
 explain/focus/get/list/read/rename/send/start, and `agent.list` takes EmptyParams. So a
@@ -11,10 +11,10 @@ This subscribes to the events that change the answer, re-reads `agent.list` when
 arrives, and prints only the agents in the focused workspace. No polling.
 
 Usage:
-    herdr-feed                 # follow the focused workspace
-    herdr-feed --workspace wY  # pin to one workspace
-    herdr-feed --once          # print once and exit
-    herdr-feed --plain         # no ANSI, for piping
+    herdr-navigator                 # follow the focused workspace
+    herdr-navigator --workspace wY  # pin to one workspace
+    herdr-navigator --once          # print once and exit
+    herdr-navigator --plain         # no ANSI, for piping
 
 Live keys: [i] pane id  [s] status  [t] title  [q] quit
 
@@ -212,7 +212,7 @@ def _fit_title(title: str, width: int) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="herdr-feed", description="Live workspace-scoped agent feed for herdr.")
+    ap = argparse.ArgumentParser(prog="herdr-navigator", description="herdr's workspace navigator, in a pane.")
     ap.add_argument("--workspace", help="pin to this workspace id instead of following focus")
     ap.add_argument("--once", action="store_true", help="print once and exit")
     ap.add_argument("--plain", action="store_true", help="no ANSI colour")

@@ -1,4 +1,4 @@
-# herdr-feed
+# herdr-navigator
 
 A live, workspace-scoped agent view for [herdr](https://herdr.dev).
 
@@ -42,7 +42,7 @@ when one arrives, and prints only the focused workspace. **No polling.**
 
 ```sh
 git clone https://github.com/afokapu/herdr-workspace-agents
-install -m755 herdr-workspace-agents/herdr-feed ~/.local/bin/
+install -m755 herdr-workspace-agents/herdr-navigator ~/.local/bin/
 ```
 
 Requires Python 3.10+ and a running herdr. No dependencies.
@@ -50,10 +50,10 @@ Requires Python 3.10+ and a running herdr. No dependencies.
 ## Use
 
 ```sh
-herdr-feed                 # follow the focused workspace, live
-herdr-feed --workspace wY  # pin to one workspace
-herdr-feed --once          # print once and exit
-herdr-feed --plain         # no ANSI, for piping
+herdr-navigator                 # follow the focused workspace, live
+herdr-navigator --workspace wY  # pin to one workspace
+herdr-navigator --once          # print once and exit
+herdr-navigator --plain         # no ANSI, for piping
 ```
 
 Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
