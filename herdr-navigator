@@ -15,7 +15,9 @@ Usage:
     herdr-navigator --once          # print once and exit
     herdr-navigator --plain         # no ANSI, for piping
 
-Keys:  j/k or up/down move   enter switch   / search   b/w/i/d/a states   esc, q close
+Keys:  j/k move   enter switch   / search   b/w/d/a states   [ ] fold   esc, q close
+       Arrow keys are herdr's — its config binds them to pane/workspace navigation
+       unconditionally, so they never reach a pane app. j/k is the movement here.
        i/s/t toggle the pane-id, status and title columns
 """
 
@@ -257,8 +259,8 @@ def _fit_title(title: str, width: int) -> str:
 
 
 def footer(cols: dict, state: str | None, plain: bool, width: int) -> str:
-    txt = (" enter switch   / search   b/w/i/d/a states   j/k move   h/l fold   z all"
-           f"   [i]{'+' if cols['id'] else '-'}id"
+    txt = (" j/k move   enter switch   / search   b w d a states   [ ] fold   z all"
+           f"   [n]{'+' if cols['id'] else '-'}id"
            f" [s]{'+' if cols['status'] else '-'}status")
     txt = _fit(txt, width)
     return txt if plain else f"{INVERT}{txt.ljust(width)}{RESET}"
@@ -446,17 +448,17 @@ def main() -> int:
                         searching, search = True, ""
                     elif tok in ("j", "k"):
                         selected += 1 if tok == "j" else -1
-                    elif tok in ("h", "l", " "):
+                    elif tok in ("[", "]", " "):
                         _fold(view, selected, collapsed,
-                              expand=None if tok == " " else (tok == "l"))
+                              expand=None if tok == " " else (tok == "]"))
                     elif tok == "z":
                         tabs_now = {t["id"] for t in view.targets if t["kind"] == "tab"}
                         collapsed.clear() if collapsed else collapsed.update(tabs_now)
                         selected = 0
                     elif tok == "q":
                         return 0
-                    elif tok in ("i", "s", "t"):
-                        cols[{"i": "id", "s": "status", "t": "title"}[tok]] ^= True
+                    elif tok in ("n", "s", "t"):
+                        cols[{"n": "id", "s": "status", "t": "title"}[tok]] ^= True
                     elif tok in STATE_KEYS:
                         state = STATE_KEYS[tok]
                         selected = 0

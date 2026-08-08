@@ -63,18 +63,36 @@ Run it in a pane and it behaves like a panel — it clears and repaints on each 
 ## Keys
 
 ```
-j / k / up / down   move
+j / k               move  (arrow keys never arrive — see below)
 enter               switch to the selected tab or pane
 click a row         switch to it
 click off the list  dismiss
 /                   search — type to filter, enter to keep, esc to clear
-h / l / left/right  fold / unfold the tab (from a pane row, its parent tab)
+[ / ]               fold / unfold the tab (from a pane row, its parent tab)
 space               toggle fold
 z                   fold everything, or unfold everything
-b w i d a           filter by state: blocked, working, idle, done, all
-i / s / t           toggle the id, status and title columns
+b w d a             filter by state: blocked, working, done, all
+n / s / t           toggle the id, status and title columns
 esc / q             close
 ```
+
+### Why not the arrow keys
+
+herdr binds them itself, and its config says so without qualification:
+
+```
+# navigate_pane_left = "h"      # left arrow always focuses the pane to the left
+# navigate_pane_right = "l"     # right arrow always focuses the pane to the right
+# navigate_workspace_up = "up"
+# navigate_workspace_down = "down"
+```
+
+They never reach a pane app. In a session-modal popup, pressing one moves herdr's focus
+away and the popup closes — which reads as "the arrow key dismissed it". `j`/`k` move,
+`[`/`]` fold.
+
+`h`/`l` are avoided for the same reason, and `i` is left alone because herdr's own agent
+filters use it.
 
 ## What it shows
 
