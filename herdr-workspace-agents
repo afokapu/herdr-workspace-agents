@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Live, workspace-scoped agent view for herdr.
+
+herdr 0.7.4's socket API has no view/filter concept — the complete `agent.*` surface is
+explain/focus/get/list/read/rename/send/start, and `agent.list` takes EmptyParams. So a
+"sidebar showing only the current workspace" cannot be requested from the server. It can,
+however, be *derived*: `events.subscribe` is a real push stream, and `workspace.focused` is
+one of its event kinds.
+
+This subscribes to the events that change the answer, re-reads `agent.list` when one
+arrives, and prints only the agents in the focused workspace. No polling.
+
+Usage:
+    herdr-workspace-agents                 # follow the focused workspace
+    herdr-workspace-agents --workspace wY  # pin to one workspace
+    herdr-workspace-agents --once          # print once and exit
+    herdr-workspace-agents --plain         # no ANSI, for piping
+
+Verified against herdr 0.7.4. If `events.subscribe` returns an error naming a missing
+field, the Subscription shape changed: run `herdr api schema --json` and check which
+variants still require no arguments.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+SOCKET = os.environ.get("HERDR_SOCK", os.path.expanduser("~/.config/herdr/herdr.sock"))
+
+# Only variants that require no arguments — the per-pane ones (agent_status_changed,
+# scroll_changed, output_matched) demand a pane_id, which would mean re-subscribing every
+# time a pane is created. `pane.updated` covers status changes globally.
+SUBSCRIPTIONS = [
+    {"type": "workspace.focused"},
+    {"type": "pane.updated"},
+    {"type": "pane.created"},
+    {"type": "pane.closed"},
+    {"type": "pane.exited"},
+    {"type": "tab.renamed"},
+]
+
+DOT = {
+    "working": ("\033[32m", "●"),   # green
+    "blocked": ("\033[31m", "◉"),   # red   — wants an answer
+    "idle":    ("\033[33m", "○"),   # yellow
+    "done":    ("\033[90m", "✓"),   # grey
+}
+RESET = "\033[0m"
+
+
+class Herdr:
+    """One connection per request. herdr replies newline-delimited."""
+
+    def __init__(self, path: str = SOCKET) -> None:
+        self.path = path
+
+    def call(self, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(self.path)
+            req = {"id": method, "method": method, "params": params or {}}
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            return json.loads(buf.split(b"\n", 1)[0] or b"{}")
+        finally:
+            s.close()
+
+    def subscribe(self, subs: list[dict]) -> socket.socket:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.path)
+        req = {"id": "sub", "method": "events.subscribe", "params": {"subscriptions": subs}}
+        s.sendall((json.dumps(req) + "\n").encode())
+        ack = s.makefile("r", encoding="utf-8").readline()
+        parsed = json.loads(ack or "{}")
+        if "error" in parsed:
+            raise RuntimeError(f"events.subscribe refused: {parsed['error']}")
+        return s
+
+
+def focused_workspace(h: Herdr) -> str | None:
+    """The workspace herdr currently considers focused, or None if it cannot be read."""
+    r = h.call("workspace.list")
+    for ws in _walk_lists(r, "workspaces"):
+        if ws.get("focused"):
+            return ws.get("workspace_id")
+    return None
+
+
+def _walk_lists(obj, key):
+    """herdr nests its payloads; find the first list stored under `key`."""
+    if isinstance(obj, dict):
+        if key in obj and isinstance(obj[key], list):
+            return obj[key]
+        for v in obj.values():
+            found = _walk_lists(v, key)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _walk_lists(v, key)
+            if found:
+                return found
+    return []
+
+
+def render(h: Herdr, ws_id: str | None, plain: bool) -> str:
+    if ws_id is None:
+        return "workspace: COULD-NOT-READ — showing nothing rather than everything"
+
+    label = ws_id
+    for ws in _walk_lists(h.call("workspace.list"), "workspaces"):
+        if ws.get("workspace_id") == ws_id:
+            label = ws.get("label") or ws_id
+            break
+
+    agents = [a for a in _walk_lists(h.call("agent.list"), "agents")
+              if a.get("workspace_id") == ws_id]
+
+    lines = [f"{label}  ({ws_id})  {len(agents)} agent(s)"]
+    if not agents:
+        lines.append("  (no agents in this workspace)")
+    for a in sorted(agents, key=lambda x: x.get("pane_id", "")):
+        status = a.get("agent_status", "unknown")
+        colour, glyph = DOT.get(status, ("\033[35m", "?"))
+        name = a.get("name") or a.get("terminal_title_stripped") or ""
+        row = f"  {glyph} {a.get('pane_id',''):<8} {status:<8} {name[:52]}"
+        lines.append(row if plain else f"{colour}{row}{RESET}")
+        if status == "blocked":
+            lines.append("      ^ waiting on you")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Live workspace-scoped agent view for herdr.")
+    ap.add_argument("--workspace", help="pin to this workspace id instead of following focus")
+    ap.add_argument("--once", action="store_true", help="print once and exit")
+    ap.add_argument("--plain", action="store_true", help="no ANSI colour")
+    args = ap.parse_args()
+
+    h = Herdr()
+    try:
+        h.call("workspace.list", timeout=2.0)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cannot reach herdr at {SOCKET}: {exc}", file=sys.stderr)
+        print("is herdr running? override with HERDR_SOCK=", file=sys.stderr)
+        return 1
+
+    pinned = args.workspace
+    ws = pinned or focused_workspace(h)
+
+    if args.once:
+        print(render(h, ws, args.plain))
+        return 0
+
+    stream = h.subscribe(SUBSCRIPTIONS)
+    reader = stream.makefile("r", encoding="utf-8")
+
+    def paint():
+        # \033[H\033[J — home + clear, so the pane behaves like a live panel
+        sys.stdout.write("" if args.plain else "\033[H\033[J")
+        print(render(h, ws, args.plain), flush=True)
+
+    paint()
+    try:
+        for line in reader:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a partial frame is not a reason to die
+            kind = _event_kind(ev)
+            if kind == "workspace_focused" and not pinned:
+                ws = _event_field(ev, "workspace_id") or ws
+            paint()
+    except KeyboardInterrupt:
+        return 0
+    except OSError as exc:
+        print(f"\nevent stream closed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        stream.close()
+    return 0
+
+
+def _event_kind(ev: dict) -> str:
+    for key in ("event", "type"):
+        v = ev.get(key) or ev.get("result", {}).get(key)
+        if isinstance(v, str):
+            return v
+    return ""
+
+
+def _event_field(ev: dict, field: str):
+    if field in ev:
+        return ev[field]
+    return ev.get("result", {}).get(field) or ev.get("params", {}).get(field)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
