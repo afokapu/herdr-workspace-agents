@@ -77,9 +77,9 @@ and the two ids are held back — a third-width pane still answers *which issue,
  ○ p1V  #1756 pr1757 ex...
 ```
 
-Below 60 columns it also drops the status word (the glyph already carries it) and the
-constant workspace prefix on the pane id, spending those columns on the title instead.
-Widen the pane and the full text returns.
+The full pane id (workspace included) and the status are **never** dropped to save room —
+they are identifiers you act on. Only the title is cut, because it is the one field you can
+still work without.
 
 ## Two deliberate choices
 

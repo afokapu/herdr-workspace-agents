@@ -152,12 +152,10 @@ def render(h: Herdr, ws_id: str | None, plain: bool) -> str:
         name = (tab_label.get(a.get("tab_id"))
                 or a.get("name") or a.get("terminal_title_stripped") or "")
         pane = a.get("pane_id", "")
-        if width < 60:
-            # Narrow: the glyph already carries the status, and the workspace prefix on
-            # the pane id is constant across every row. Spend the columns on the title.
-            prefix = f" {glyph} {pane.split(':')[-1]:<4} "
-        else:
-            prefix = f"  {glyph} {pane:<7} {status:<7} "
+        # The full pane id (workspace included) and the status are identifiers, not prose.
+        # They are never dropped to save room — only the title is truncated, because it is
+        # the only field you can still act without.
+        prefix = f" {glyph} {pane:<7} {status:<7} "
         row = prefix + _fit_title(name, max(4, width - len(prefix)))
         lines.append(row if plain else f"{colour}{row}{RESET}")
         if status == "blocked":
