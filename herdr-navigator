@@ -285,32 +285,50 @@ def _fold(view: "View", idx: int, collapsed: set[str], expand: bool | None) -> N
         collapsed.discard(tid) if tid in collapsed else collapsed.add(tid)
 
 
-def _read_escape(stream) -> str:
-    """Read the rest of an escape sequence after an ESC byte.
+def read_keys(fd: int) -> list[str]:
+    """Read every byte currently available and split it into key tokens.
 
-    The FIRST byte gets a generous wait. A terminal delivers `ESC [ A` as one burst, but
-    not always in one read — with a 50ms window an arrow key could return "" here and be
-    mistaken for a lone ESC, which closed the popup instead of moving the cursor. A real
-    lone ESC still resolves in 200ms, which is imperceptible.
+    `sys.stdin.read(1)` cannot be used here. It is a BUFFERED text stream: one read pulls a
+    whole chunk into Python's buffer, after which `select()` on the file descriptor reports
+    nothing ready even though bytes are waiting. An arrow key (ESC [ A) would then surface
+    as a bare ESC — which closes the popup instead of moving the cursor.
+
+    Reading the raw descriptor and tokenising the chunk removes the class of bug entirely:
+    the sequence is always whole by the time it is interpreted.
+
+    Tokens: "\033[A" style CSI sequences kept intact, "\033" alone for a real lone ESC,
+    and single characters for everything else.
     """
-    seq = ""
-    for i in range(32):
-        r, _, _ = select.select([stream], [], [], 0.2 if i == 0 else 0.05)
-        if not r:
-            break
-        c = stream.read(1)
-        seq += c
-        if c in "Mm~" or (seq.startswith("[") and c.isalpha() and c != "<"):
-            break
-    return seq
+    try:
+        data = os.read(fd, 4096).decode("utf-8", "replace")
+    except OSError:
+        return []
+    out, i = [], 0
+    while i < len(data):
+        c = data[i]
+        if c != "\033":
+            out.append(c)
+            i += 1
+            continue
+        # ESC: consume a CSI/SS3 sequence if one follows, else emit a lone ESC
+        if i + 1 < len(data) and data[i + 1] in "[O":
+            j = i + 2
+            while j < len(data) and not (data[j].isalpha() or data[j] in "~"):
+                j += 1
+            out.append(data[i:j + 1])
+            i = j + 1
+        else:
+            out.append("\033")
+            i += 1
+    return out
 
 
 def _click_row(seq: str) -> tuple[int | None, bool]:
     """(screen_row, was_a_button0_press). Row is None for anything else."""
-    if not seq.startswith("[<") or not seq.endswith("M"):
+    if not seq.startswith("\033[<") or not seq.endswith("M"):
         return None, False
     try:
-        button, _col, row = seq[2:-1].split(";")
+        button, _col, row = seq[3:-1].split(";")
         return (int(row), True) if int(button) == 0 else (None, False)
     except ValueError:
         return None, False
@@ -391,64 +409,58 @@ def main() -> int:
                 continue
 
             if interactive and sys.stdin in ready:
-                ch = sys.stdin.read(1)
+                for tok in read_keys(sys.stdin.fileno()):
+                    if searching:
+                        if tok in ("\r", "\n"):
+                            searching = False
+                        elif tok == "\033":
+                            searching, search = False, ""
+                        elif tok in ("\x7f", "\b"):
+                            search = search[:-1]
+                        elif len(tok) == 1 and tok.isprintable():
+                            search += tok
+                        selected = 0
+                        continue
 
-                if searching:                         # typing a filter
-                    if ch in ("\r", "\n"):
-                        searching = False
-                    elif ch == "\033":
-                        _read_escape(sys.stdin)
-                        searching, search = False, ""
-                    elif ch in ("\x7f", "\b"):
-                        search = search[:-1]
-                    elif ch.isprintable():
-                        search += ch
-                    selected = 0
-                    paint()
-                elif ch == "\033":
-                    seq = _read_escape(sys.stdin)
-                    if seq == "":                     # bare ESC closes
-                        return 0
-                    if seq in ("[A", "[B"):
-                        selected += -1 if seq == "[A" else 1
-                        paint()
-                    elif seq in ("[C", "[D"):        # right / left
-                        _fold(view, selected, collapsed, expand=(seq == "[C"))
-                        paint()
-                    elif seq.startswith("[<"):
-                        row, pressed = _click_row(seq)
+                    if tok in ("\033[A", "\033OA"):
+                        selected -= 1
+                    elif tok in ("\033[B", "\033OB"):
+                        selected += 1
+                    elif tok in ("\033[C", "\033OC"):
+                        _fold(view, selected, collapsed, expand=True)
+                    elif tok in ("\033[D", "\033OD"):
+                        _fold(view, selected, collapsed, expand=False)
+                    elif tok.startswith("\033[<"):
+                        row, pressed = _click_row(tok)
                         if pressed:
                             idx = view.row_of.get(row or -1)
-                            if idx is not None and go(idx):
-                                return 0
-                            return 0                  # clicked off the list: dismiss
-                elif ch in ("\r", "\n"):
-                    if go(selected):
+                            if idx is not None:
+                                go(idx)
+                            return 0
+                    elif tok == "\033":
                         return 0
-                elif ch == "/":
-                    searching, search = True, ""
-                    paint()
-                elif ch in ("j", "k"):
-                    selected += 1 if ch == "j" else -1
-                    paint()
-                elif ch in ("h", "l", " "):
-                    _fold(view, selected, collapsed,
-                          expand=None if ch == " " else (ch == "l"))
-                    paint()
-                elif ch == "z":                      # fold or unfold everything
-                    all_tabs = {t["id"] for t in view.targets if t["kind"] == "tab"}
-                    collapsed.clear() if collapsed else collapsed.update(all_tabs)
-                    selected = 0
-                    paint()
-                elif ch in STATE_KEYS:
-                    state = STATE_KEYS[ch]
-                    selected = 0
-                    paint()
-                elif ch == "q":
-                    return 0
-                elif ch in ("t",):
-                    cols["title"] ^= True
-                    paint()
+                    elif tok in ("\r", "\n"):
+                        if go(selected):
+                            return 0
+                    elif tok == "/":
+                        searching, search = True, ""
+                    elif tok in ("j", "k"):
+                        selected += 1 if tok == "j" else -1
+                    elif tok in ("h", "l", " "):
+                        _fold(view, selected, collapsed,
+                              expand=None if tok == " " else (tok == "l"))
+                    elif tok == "z":
+                        tabs_now = {t["id"] for t in view.targets if t["kind"] == "tab"}
+                        collapsed.clear() if collapsed else collapsed.update(tabs_now)
+                        selected = 0
+                    elif tok == "q":
+                        return 0
+                    elif tok in ("i", "s", "t"):
+                        cols[{"i": "id", "s": "status", "t": "title"}[tok]] ^= True
+                    elif tok in STATE_KEYS:
+                        state = STATE_KEYS[tok]
+                        selected = 0
+                paint()
                 if stream not in ready:
                     continue
 
