@@ -167,7 +167,6 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
         head += f"   / {search}"
     if state:
         head += f"   [{state}]"
-    v.lines.append(_fit(head, width) if plain else f"{BOLD}{_fit(head, width)}{RESET}")
 
     # SUMMARY — what needs you, before where it is. Counted over PANES, not tabs: a tab's
     # status is an aggregate, so counting tabs would under-report a workspace where one tab
@@ -180,35 +179,74 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
     # not recognise (shell panes report "unknown") would show 9 of 12 and look complete.
     assert sum(tally.values()) == len(panes)
 
-    scale = f"{len(panes)} panes in {len(tabs)} tabs"
     order = ("blocked", "working", "idle", "done", "other")
 
-    def summary_cells(with_words: bool) -> tuple[str, str]:
-        """(plain_text, coloured) — built together so the fit test measures what is drawn."""
-        plain_cells, rich_cells = [], []
-        for name in order:
-            colour_, glyph_ = DOT.get(name, ("\033[35m", "·"))
-            n = tally[name]
-            cell = f"{glyph_} {n}" + (f" {name}" if with_words else "")
-            plain_cells.append(cell)
-            if n == 0:
-                rich_cells.append(f"{DIM}{cell}{RESET}")            # shown, not hidden
-            elif name == "blocked":
-                rich_cells.append(f"{colour_}{BOLD}{cell}{RESET}")  # the one that wants you
-            else:
-                rich_cells.append(f"{colour_}{cell}{RESET}")
-        gap = "   " if with_words else "  "
-        return (f"{scale}  " + gap.join(plain_cells),
-                f"{DIM}{scale}{RESET}  " + gap.join(rich_cells))
+    def paint_cell(name: str, txt: str) -> str:
+        colour_, _ = DOT.get(name, ("\033[35m", "·"))
+        n = tally[name]
+        if plain:
+            return txt
+        if n == 0:
+            return f"{DIM}{txt}{RESET}"
+        if name == "blocked":
+            return f"{colour_}{BOLD}{txt}{RESET}"
+        return f"{colour_}{txt}{RESET}"
 
-    # Measure the real line rather than estimate it: words are dropped only when they
-    # genuinely do not fit, so a wide pane never loses them to a wrong guess.
-    text, rich = summary_cells(with_words=True)
-    if len(text) > width:
-        text, rich = summary_cells(with_words=False)
-    v.lines.append(_fit(text, width) if plain else rich)
-    rule = "-" if plain else "─"
-    v.lines.append(rule * min(width, 200) if plain else f"{DIM}{rule * min(width, 200)}{RESET}")
+    inner = max(20, width - 2)
+
+    # A PROPORTION BAR, one cell per pane where it fits. Reading a mix is faster than
+    # reading five numbers, and it is the mix that tells you whether a workspace is busy,
+    # stalled, or waiting on you.
+    # A distinct fill per state, so the bar is readable piped to a file as well as coloured
+    # on screen. Colour alone would make `--plain` output a single meaningless block.
+    FILL = {"blocked": "█", "working": "▓", "idle": "▒", "done": "░", "other": "·"}
+    seg, used = [], 0
+    for i, name in enumerate(order):
+        share = 0 if not panes else round(tally[name] * inner / len(panes))
+        if i == len(order) - 1:
+            share = max(0, inner - used)          # last segment absorbs the rounding
+        used += share
+        if share:
+            seg.append(paint_cell(name, FILL[name] * share))
+    bar = "".join(seg) if panes else (DIM + "░" * inner + RESET if not plain else "-" * inner)
+
+    # Column headings: the count above, the word beneath, so the eye lands on the number.
+    col_w = max(9, min(14, inner // len(order)))
+    nums = "".join(paint_cell(n, f"{DOT.get(n, ('', '·'))[1]} {tally[n]}".ljust(col_w))
+                   for n in order)
+    words = "".join(paint_cell(n, n.ljust(col_w)) for n in order)
+
+    title = _fit(f"{label}", inner - len(ws_id) - 2)
+    top = f"┌{'─' * inner}┐" if not plain else f"+{'-' * inner}+"
+    bot = f"└{'─' * inner}┘" if not plain else f"+{'-' * inner}+"
+    edge = (lambda body: f"│{body}│") if not plain else (lambda body: f"|{body}|")
+
+    def pad(visible: str, rich: str | None = None) -> str:
+        """Pad by VISIBLE length — ANSI codes occupy no columns but do occupy characters."""
+        fill = " " * max(0, inner - len(visible))
+        return edge((rich if rich is not None else visible) + fill)
+
+    v.lines.append(f"{DIM}{top}{RESET}" if not plain else top)
+    hdr = f" {title}"
+    v.lines.append(pad(hdr + " " * max(1, inner - len(hdr) - len(ws_id) - 1) + ws_id,
+                       None if plain else
+                       f"{BOLD}{hdr}{RESET}" + " " * max(1, inner - len(hdr) - len(ws_id) - 1)
+                       + f"{DIM}{ws_id}{RESET}"))
+    v.lines.append(pad(" " * inner))
+    v.lines.append(pad(" " + "".join(f"{DOT.get(n,('','·'))[1]} {tally[n]}".ljust(col_w)
+                                     for n in order), " " + nums))
+    v.lines.append(pad(" " + "".join(n.ljust(col_w) for n in order), " " + words))
+    v.lines.append(pad(" " * inner))
+    plain_bar = "".join(FILL[n] * (0 if not panes else round(tally[n] * inner / len(panes)))
+                        for n in order)[:inner].ljust(inner, FILL["other"])
+    v.lines.append(pad(plain_bar, bar))
+    scale = f" {len(panes)} panes in {len(tabs)} tabs"
+    if search:
+        scale += f"    / {search}"
+    if state:
+        scale += f"    [{state}]"
+    v.lines.append(pad(scale, None if plain else f"{DIM}{scale}{RESET}"))
+    v.lines.append(f"{DIM}{bot}{RESET}" if not plain else bot)
 
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
         tid = t.get("tab_id", "")

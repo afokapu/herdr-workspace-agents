@@ -94,32 +94,35 @@ away and the popup closes — which reads as "the arrow key dismissed it". `j`/`
 `h`/`l` are avoided for the same reason, and `i` is left alone because herdr's own agent
 filters use it.
 
-## Summary bar
+## Summary panel
 
 Above the tree, what needs you before where it is:
 
 ```
-12 panes in 11 tabs  ● 0 blocked   ◆ 1 working   ○ 6 idle   ✓ 2 done   · 3 other
+┌──────────────────────────────────────────────────────────────────┐
+│ #1670 lifecycle execution                                    wY  │
+│                                                                  │
+│ ● 0           ◆ 1           ○ 6           ✓ 2           · 3      │
+│ blocked       working       idle          done          other    │
+│                                                                  │
+│▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░░░░░░░············________ │
+│ 12 panes in 11 tabs                                              │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Narrow, the words go and the glyphs stay — but only when they genuinely do not fit: the
-line is built and measured, not estimated, so a wide pane never loses its labels to a bad
-guess.
+The count sits above its label so the eye lands on the number. `blocked` is bold when
+non-zero — it is the only state that wants something from you.
 
-```
-12 panes in 11 tabs  ● 0  ◆ 1  ○ 6  ✓ 2  · 3
-```
+The bar is one cell per pane. Reading a mix is faster than reading five numbers, and the
+mix is what says whether a workspace is busy, stalled, or waiting on you. Each state has
+its own fill (`█ ▓ ▒ ░ ·`) as well as its own colour, so the bar still reads when piped to
+a file — colour alone would make `--plain` a single meaningless block.
 
-`blocked` is drawn bold when it is non-zero. It is the only state that wants something
-from you.
-
-Counted over **panes**, not tabs — a tab's status is an aggregate, so counting tabs would
-under-report a workspace where one tab holds three agents.
-
-The parts **sum to the pane count**, asserted in code. `other` exists because shell panes
-report `unknown`: a tally that quietly dropped the states it did not recognise would show 9
-of 12 and look complete. A zero is shown dimmed rather than hidden, because an absent count
-reads as "not measured".
+Counted over **panes**, not tabs: a tab's status is an aggregate, so counting tabs would
+under-report a workspace where one tab holds three agents. The parts **sum to the pane
+count**, asserted in code — `other` exists because shell panes report `unknown`, and a
+tally that dropped what it did not recognise would show 9 of 12 and look complete. Zeroes
+are dimmed rather than hidden: an absent count reads as "not measured".
 
 ## What it shows
 
