@@ -66,11 +66,29 @@ Run it in a pane and it behaves like a panel — it clears and repaints on each 
 | ○ yellow | `idle` | finished its turn |
 | ✓ grey | `done` | session ended |
 
+## Narrow panes keep the identifiers
+
+A worker title is `#<issue> pr<pr> <slug>`. When the pane is too narrow, the **slug** is cut
+and the two ids are held back — a third-width pane still answers *which issue, which PR*:
+
+```
+ ○ p0   #1671 pr1692 up...
+ ● p15  orch #1670 toke...
+ ○ p1V  #1756 pr1757 ex...
+```
+
+Below 60 columns it also drops the status word (the glyph already carries it) and the
+constant workspace prefix on the pane id, spending those columns on the title instead.
+Widen the pane and the full text returns.
+
 ## Two deliberate choices
 
 **It subscribes only to argument-free event variants.** `pane.agent_status_changed` requires
 a `pane_id`, which would mean re-subscribing every time a pane is created. `pane.updated`
 covers status changes globally and needs nothing.
+
+**It renders the tab title, not the agent name** — the tab is what the operator named the
+work; a worker's own tooling can overwrite its agent name.
 
 **If the workspace cannot be read it shows nothing, and says so** — rather than falling back
 to every agent. A view that silently widens when it loses its filter is worse than one that

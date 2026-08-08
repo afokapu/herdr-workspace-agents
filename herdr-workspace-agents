@@ -26,9 +26,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
+import shutil
 import socket
 import sys
-import time
+
+# herdr has no subscribable agent.* event: the Subscription enum covers workspace.*,
+# worktree.*, tab.*, pane.* and layout.updated only, and the per-pane variants need a
+# pane_id. So `agent.rename` — and anything else that changes agent metadata without
+# touching a pane — arrives through no event at all. This is the floor that catches it.
+# It is a safety net, not the mechanism: events still drive the fast path.
+FALLBACK_REPAINT_SECONDS = 20
 
 SOCKET = os.environ.get("HERDR_SOCK", os.path.expanduser("~/.config/herdr/herdr.sock"))
 
@@ -127,18 +135,67 @@ def render(h: Herdr, ws_id: str | None, plain: bool) -> str:
     agents = [a for a in _walk_lists(h.call("agent.list"), "agents")
               if a.get("workspace_id") == ws_id]
 
-    lines = [f"{label}  ({ws_id})  {len(agents)} agent(s)"]
+    # The tab title is what the operator named the work; prefer it over the agent name,
+    # which a worker's own tooling may overwrite.
+    tab_label = {t.get("tab_id"): t.get("label")
+                 for t in _walk_lists(h.call("tab.list"), "tabs")}
+
+    # Truncate to the ACTUAL pane width. A hardcoded width wraps every row into two when
+    # the pane is a third of the screen, which is exactly when you need it readable.
+    width = shutil.get_terminal_size(fallback=(80, 24)).columns
+    lines = [_fit(f"{label}  ({ws_id})  {len(agents)} agent(s)", width)]
     if not agents:
         lines.append("  (no agents in this workspace)")
     for a in sorted(agents, key=lambda x: x.get("pane_id", "")):
         status = a.get("agent_status", "unknown")
         colour, glyph = DOT.get(status, ("\033[35m", "?"))
-        name = a.get("name") or a.get("terminal_title_stripped") or ""
-        row = f"  {glyph} {a.get('pane_id',''):<8} {status:<8} {name[:52]}"
+        name = (tab_label.get(a.get("tab_id"))
+                or a.get("name") or a.get("terminal_title_stripped") or "")
+        pane = a.get("pane_id", "")
+        if width < 60:
+            # Narrow: the glyph already carries the status, and the workspace prefix on
+            # the pane id is constant across every row. Spend the columns on the title.
+            prefix = f" {glyph} {pane.split(':')[-1]:<4} "
+        else:
+            prefix = f"  {glyph} {pane:<7} {status:<7} "
+        row = prefix + _fit_title(name, max(4, width - len(prefix)))
         lines.append(row if plain else f"{colour}{row}{RESET}")
         if status == "blocked":
-            lines.append("      ^ waiting on you")
+            lines.append(_fit("      ^ waiting on you", width))
     return "\n".join(lines)
+
+
+def _fit(text: str, width: int) -> str:
+    """Hard-truncate so a row never wraps; three dots mark what was cut."""
+    if width <= 3 or len(text) <= width:
+        return text[:width] if width > 0 else ""
+    return text[: width - 3] + "..."
+
+
+def _fit_title(title: str, width: int) -> str:
+    """Truncate a worker title, but never at the cost of its identifiers.
+
+    A title is `#<issue> pr<pr> <slug>`. The slug is prose; the two ids are the whole
+    point of glancing at the panel. So the ids are held back and only the slug is cut —
+    which means a very narrow pane still answers "which issue, which PR".
+    """
+    if len(title) <= width:
+        return title
+
+    head, _, tail = title.partition(" ")
+    ids = head
+    if tail.startswith(("pr", "PR")):
+        pr, _, rest = tail.partition(" ")
+        ids = f"{head} {pr}"
+        tail = rest
+    else:
+        tail = tail
+
+    if len(ids) >= width:          # not even the ids fit — cut them, still marked
+        return _fit(ids, width)
+    if len(ids) + 4 > width:       # ids fit but nothing meaningful of the slug does
+        return ids
+    return ids + " " + _fit(tail, width - len(ids) - 1)
 
 
 def main() -> int:
@@ -173,7 +230,17 @@ def main() -> int:
 
     paint()
     try:
-        for line in reader:
+        while True:
+            # Block on the event stream, but wake on the fallback so anything herdr does
+            # not emit an event for (agent renames, notably) still converges.
+            ready, _, _ = select.select([stream], [], [], FALLBACK_REPAINT_SECONDS)
+            if not ready:
+                paint()
+                continue
+            line = reader.readline()
+            if not line:
+                print("\nevent stream ended", file=sys.stderr)
+                return 1
             line = line.strip()
             if not line:
                 continue
@@ -181,8 +248,7 @@ def main() -> int:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue  # a partial frame is not a reason to die
-            kind = _event_kind(ev)
-            if kind == "workspace_focused" and not pinned:
+            if _event_kind(ev) == "workspace_focused" and not pinned:
                 ws = _event_field(ev, "workspace_id") or ws
             paint()
     except KeyboardInterrupt:
