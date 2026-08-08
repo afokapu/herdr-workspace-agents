@@ -127,8 +127,15 @@ def _walk_lists(obj, key):
 
 
 def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
+    """Render herdr's own navigator content for one workspace.
+
+    `tab.list` already carries everything the navigator shows — per-tab `agent_status`,
+    `label`, `number`, `focused`, `pane_count` — so this ports that rather than
+    reconstructing it from `agent.list`. One call instead of three, and the label is the
+    operator's own tab name rather than an agent name a worker's tooling may overwrite.
+    """
     if ws_id is None:
-        return "workspace: COULD-NOT-READ — showing nothing rather than everything"
+        return "workspace: COULD-NOT-READ - showing nothing rather than everything"
 
     label = ws_id
     for ws in _walk_lists(h.call("workspace.list"), "workspaces"):
@@ -136,35 +143,25 @@ def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
             label = ws.get("label") or ws_id
             break
 
-    agents = [a for a in _walk_lists(h.call("agent.list"), "agents")
-              if a.get("workspace_id") == ws_id]
+    tabs = [t for t in _walk_lists(h.call("tab.list", {"workspace_id": ws_id}), "tabs")
+            if t.get("workspace_id") == ws_id]
 
-    # The tab title is what the operator named the work; prefer it over the agent name,
-    # which a worker's own tooling may overwrite.
-    tab_label = {t.get("tab_id"): t.get("label")
-                 for t in _walk_lists(h.call("tab.list"), "tabs")}
-
-    # Truncate to the ACTUAL pane width. A hardcoded width wraps every row into two when
-    # the pane is a third of the screen, which is exactly when you need it readable.
     width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    lines = [_fit(f"{label}  ({ws_id})  {len(agents)} agent(s)", width)]
-    if not agents:
-        lines.append("  (no agents in this workspace)")
-    for a in sorted(agents, key=lambda x: x.get("pane_id", "")):
-        status = a.get("agent_status", "unknown")
+    lines = [_fit(f"{label}  ({ws_id})  {len(tabs)} tabs", width)]
+    if not tabs:
+        lines.append("  (no tabs in this workspace)")
+
+    for t in sorted(tabs, key=lambda x: x.get("number", 0)):
+        status = t.get("agent_status") or "-"
         colour, glyph = DOT.get(status, ("\033[35m", "?"))
-        name = (tab_label.get(a.get("tab_id"))
-                or a.get("name") or a.get("terminal_title_stripped") or "")
-        pane = a.get("pane_id", "")
-        # The full pane id (workspace included) and the status are identifiers, not prose.
-        # They are never dropped to save room — only the title is truncated, because it is
-        # the only field you can still act without.
-        prefix = f" {glyph} "
+        here = ">" if t.get("focused") else " "
+        # The tab number is how you switch to it, so it is never dropped.
+        prefix = f"{here}{glyph} {t.get('number','?'):<2} "
         if cols["id"]:
-            prefix += f"{pane:<7} "
+            prefix += f"{t.get('tab_id',''):<7} "
         if cols["status"]:
             prefix += f"{status:<7} "
-        body = _fit_title(name, max(4, width - len(prefix))) if cols["title"] else ""
+        body = _fit_title(t.get("label") or "", max(4, width - len(prefix))) if cols["title"] else ""
         row = (prefix + body).rstrip()
         lines.append(row if plain else f"{colour}{row}{RESET}")
         if status == "blocked":

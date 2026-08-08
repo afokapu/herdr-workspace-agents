@@ -9,13 +9,16 @@ you.
 This gives you just the current workspace, live.
 
 ```
-🍋 #1670 lifecycle execution  (wY)  10 agent(s)
-  ● wY:p15   working  orch #1670 token-proves-gates-passed
-  ◉ wY:p1V   blocked  #1756 pr1757 expired-silent-swallow-deadlines
+🍋 #1670 lifecycle execution  (wY)  13 tabs
+>● 1  wY:t1   working orch #1670 token-proves-gates-passed
+ ◉ 18 wY:tJ   blocked #1756 pr1757 expired-silent-swallow-deadlines
       ^ waiting on you
-  ○ wY:p1T   idle     #1670 pr1752 token-proves-gates-passed
-  ✓ wY:pK    done     #1653 pr1660 state-object-rename-rejects-live-uids
+ ○ 19 wY:tK   idle    #1670 pr1752 token-proves-gates-passed
+ ✓ 17 wY:tH   done    #1653 pr1660 state-object-rename-rejects-live-uids
 ```
+
+`>` marks the focused tab. The leading number is the tab number — what you press to switch
+to it — so it is never dropped.
 
 ## Why it is derived rather than requested
 
@@ -75,6 +78,7 @@ Keys need a tty. Piped or redirected, the flags are the whole interface.
 | glyph | status | meaning |
 |-------|--------|---------|
 | ● green | `working` | busy |
+| ? magenta | `unknown` | a tab with no live agent |
 | ◉ red | `blocked` | **waiting on you** |
 | ○ yellow | `idle` | finished its turn |
 | ✓ grey | `done` | session ended |
