@@ -65,6 +65,18 @@ MOUSE_OFF = "\033[?1006l\033[?1000l"
 
 STATE_KEYS = {"b": "blocked", "w": "working", "i": "idle", "d": "done", "a": None}
 
+# Addressed to coding agents reading this output. Agents habitually poll in a shell loop and
+# then report "no change" from a call that failed — every wrong status in this workspace
+# today came from that, not from herdr. herdr pushes; ask it to.
+AGENT_NOTE = """AGENTS — monitor with herdr, do not poll:
+  herdr wait agent-status <pane> --status blocked --timeout <ms>   # blocks until it needs a human
+  herdr wait output <pane> --match <regex> --regex --timeout <ms>  # blocks until it prints a match
+  herdr notification show "<title>" --body "<text>" --sound request|done
+CHECK THE EXIT CODE. `herdr wait` exits 0 on a match and non-zero on timeout; a timeout is
+NOT an event. Guard it:  if herdr wait ...; then echo MATCHED; fi
+Match on STATE, never on prose: a regex over pane text will match the brief you wrote.
+For facts herdr cannot see (CI, PRs, git), poll those and let herdr do the notifying."""
+
 
 class Herdr:
     def __init__(self, path: str = SOCKET) -> None:
@@ -246,6 +258,8 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
     if state:
         scale += f"    [{state}]"
     v.lines.append(pad(scale, None if plain else f"{DIM}{scale}{RESET}"))
+    hint = " agents: herdr wait agent-status <pane> --status blocked   (see foot)"
+    v.lines.append(pad(_fit(hint, inner), None if plain else f"{DIM}{_fit(hint, inner)}{RESET}"))
     v.lines.append(f"{DIM}{bot}{RESET}" if not plain else bot)
 
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
@@ -443,6 +457,10 @@ def main() -> int:
     if args.once:
         w = shutil.get_terminal_size(fallback=(80, 24)).columns
         print("\n".join(build(h, ws, cols, search, state, -1, args.plain, w, collapsed).lines))
+        # --once is the agent-facing path: a human watches the live view, an agent captures
+        # this. Print the guidance where it will actually be read.
+        print()
+        print(AGENT_NOTE if args.plain else f"{DIM}{AGENT_NOTE}{RESET}")
         return 0
 
     stream = h.subscribe(SUBSCRIPTIONS)

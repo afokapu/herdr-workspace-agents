@@ -60,6 +60,26 @@ Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
 
 Run it in a pane and it behaves like a panel — it clears and repaints on each event.
 
+## For coding agents
+
+`--once` prints a monitoring note after the tree, because that is the path an agent captures
+while a human watches the live view:
+
+```
+AGENTS — monitor with herdr, do not poll:
+  herdr wait agent-status <pane> --status blocked --timeout <ms>
+  herdr wait output <pane> --match <regex> --regex --timeout <ms>
+  herdr notification show "<title>" --body "<text>" --sound request|done
+CHECK THE EXIT CODE. `herdr wait` exits 0 on a match and non-zero on timeout; a timeout is
+NOT an event. Guard it:  if herdr wait ...; then echo MATCHED; fi
+Match on STATE, never on prose: a regex over pane text will match the brief you wrote.
+For facts herdr cannot see (CI, PRs, git), poll those and let herdr do the notifying.
+```
+
+Each line is there because it was got wrong first: an unguarded `herdr wait` announced two
+events that never happened, and a regex over pane text matched the very brief that had been
+sent to the pane. herdr was right in both cases; the caller was not.
+
 ## Keys
 
 ```
