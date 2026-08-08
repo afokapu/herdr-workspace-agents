@@ -169,9 +169,9 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
         head += f"   [{state}]"
     v.lines.append(_fit(head, width) if plain else f"{BOLD}{_fit(head, width)}{RESET}")
 
-    # SUMMARY — what needs you, before the detail of where it is. Counted over PANES, not
-    # tabs: a tab's status is an aggregate, so counting tabs would under-report a workspace
-    # where one tab holds three agents.
+    # SUMMARY — what needs you, before where it is. Counted over PANES, not tabs: a tab's
+    # status is an aggregate, so counting tabs would under-report a workspace where one tab
+    # holds three agents.
     tally = {"blocked": 0, "working": 0, "idle": 0, "done": 0, "other": 0}
     for p_ in panes:
         st_ = p_.get("agent_status")
@@ -179,18 +179,36 @@ def build(h: Herdr, ws_id: str | None, cols: dict, search: str,
     # The parts must SUM to the pane count. A tally that quietly drops the states it does
     # not recognise (shell panes report "unknown") would show 9 of 12 and look complete.
     assert sum(tally.values()) == len(panes)
-    parts = [f"{len(tabs)} tabs · {len(panes)} panes"]
-    for name in ("blocked", "working", "idle", "done", "other"):
-        colour_, glyph_ = DOT.get(name, ("\033[35m", "·"))
-        n = tally[name]
-        chunk = f"{glyph_}{n} {name}"
-        # Zero of something is worth showing dim rather than hiding — an absent count reads
-        # as "not measured", and today's whole programme is about that distinction.
-        parts.append(chunk if plain else
-                     (f"{colour_}{BOLD}{chunk}{RESET}" if n else f"{DIM}{chunk}{RESET}"))
-    summary = "  ".join(parts)
-    v.lines.append(_fit(summary, width) if plain else summary)
-    v.lines.append("─" * min(width, 200) if not plain else "-" * min(width, 200))
+
+    scale = f"{len(panes)} panes in {len(tabs)} tabs"
+    order = ("blocked", "working", "idle", "done", "other")
+
+    def summary_cells(with_words: bool) -> tuple[str, str]:
+        """(plain_text, coloured) — built together so the fit test measures what is drawn."""
+        plain_cells, rich_cells = [], []
+        for name in order:
+            colour_, glyph_ = DOT.get(name, ("\033[35m", "·"))
+            n = tally[name]
+            cell = f"{glyph_} {n}" + (f" {name}" if with_words else "")
+            plain_cells.append(cell)
+            if n == 0:
+                rich_cells.append(f"{DIM}{cell}{RESET}")            # shown, not hidden
+            elif name == "blocked":
+                rich_cells.append(f"{colour_}{BOLD}{cell}{RESET}")  # the one that wants you
+            else:
+                rich_cells.append(f"{colour_}{cell}{RESET}")
+        gap = "   " if with_words else "  "
+        return (f"{scale}  " + gap.join(plain_cells),
+                f"{DIM}{scale}{RESET}  " + gap.join(rich_cells))
+
+    # Measure the real line rather than estimate it: words are dropped only when they
+    # genuinely do not fit, so a wide pane never loses them to a wrong guess.
+    text, rich = summary_cells(with_words=True)
+    if len(text) > width:
+        text, rich = summary_cells(with_words=False)
+    v.lines.append(_fit(text, width) if plain else rich)
+    rule = "-" if plain else "─"
+    v.lines.append(rule * min(width, 200) if plain else f"{DIM}{rule * min(width, 200)}{RESET}")
 
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
         tid = t.get("tab_id", "")

@@ -99,8 +99,19 @@ filters use it.
 Above the tree, what needs you before where it is:
 
 ```
-11 tabs · 12 panes  ●0 blocked  ◆2 working  ○5 idle  ✓2 done  ·3 other
+12 panes in 11 tabs  ● 0 blocked   ◆ 1 working   ○ 6 idle   ✓ 2 done   · 3 other
 ```
+
+Narrow, the words go and the glyphs stay — but only when they genuinely do not fit: the
+line is built and measured, not estimated, so a wide pane never loses its labels to a bad
+guess.
+
+```
+12 panes in 11 tabs  ● 0  ◆ 1  ○ 6  ✓ 2  · 3
+```
+
+`blocked` is drawn bold when it is non-zero. It is the only state that wants something
+from you.
 
 Counted over **panes**, not tabs — a tab's status is an aggregate, so counting tabs would
 under-report a workspace where one tab holds three agents.
