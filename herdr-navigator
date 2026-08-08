@@ -63,6 +63,16 @@ DOT = {
     "done":    ("\033[90m", "✓"),   # grey
 }
 RESET = "\033[0m"
+BOLD = "\033[1m"
+INVERT = "\033[7m"
+
+# SGR mouse reporting (1006) with button tracking (1000). herdr forwards mouse to a pane
+# app that asks for it — the config says so of lazygit and btop, and the same holds here.
+MOUSE_ON = "\033[?1000h\033[?1006h"
+MOUSE_OFF = "\033[?1006l\033[?1000l"
+
+# screen row (1-based) -> tab_id, rebuilt on every paint so a click can be resolved
+ROW_TO_TAB: dict[int, str] = {}
 
 
 class Herdr:
@@ -147,10 +157,12 @@ def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
             if t.get("workspace_id") == ws_id]
 
     width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    lines = [_fit(f"{label}  ({ws_id})  {len(tabs)} tabs", width)]
+    header = _fit(f"{label}  ({ws_id})  {len(tabs)} tabs", width)
+    lines = [header if plain else f"{BOLD}{header}{RESET}"]
     if not tabs:
         lines.append("  (no tabs in this workspace)")
 
+    ROW_TO_TAB.clear()
     for t in sorted(tabs, key=lambda x: x.get("number", 0)):
         status = t.get("agent_status") or "-"
         colour, glyph = DOT.get(status, ("\033[35m", "?"))
@@ -163,7 +175,12 @@ def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
             prefix += f"{status:<7} "
         body = _fit_title(t.get("label") or "", max(4, width - len(prefix))) if cols["title"] else ""
         row = (prefix + body).rstrip()
-        lines.append(row if plain else f"{colour}{row}{RESET}")
+        # +1 because terminal rows are 1-based and the header occupies row 1
+        ROW_TO_TAB[len(lines) + 1] = t.get("tab_id", "")
+        if t.get("focused") and not plain:
+            lines.append(f"{INVERT}{_fit(row.ljust(width), width)}{RESET}")
+        else:
+            lines.append(row if plain else f"{colour}{row}{RESET}")
         if status == "blocked":
             lines.append(_fit("      ^ waiting on you", width))
     return "\n".join(lines)
@@ -173,7 +190,7 @@ def footer(cols: dict, plain: bool, width: int) -> str:
     """The two toggles, always visible, so the panel documents its own controls."""
     def mark(on: bool) -> str:
         return "on " if on else "off"
-    txt = f" [i] id {mark(cols['id'])}  [s] status {mark(cols['status'])}  [q] quit"
+    txt = f" click=go  [i] id {mark(cols['id'])}  [s] status {mark(cols['status'])}  [q] quit"
     txt = _fit(txt, width)
     return txt if plain else f"\033[7m{txt}\033[0m"
 
@@ -257,6 +274,8 @@ def main() -> int:
         try:
             saved = termios.tcgetattr(sys.stdin)
             tty.setcbreak(sys.stdin.fileno())
+            sys.stdout.write(MOUSE_ON)
+            sys.stdout.flush()
         except (termios.error, ValueError):
             interactive = False
 
@@ -271,12 +290,21 @@ def main() -> int:
                 paint()
                 continue
             if interactive and sys.stdin in ready:
-                key = sys.stdin.read(1).lower()
-                if key == "q":
-                    return 0
-                if key in ("i", "s", "t"):
-                    cols[{"i": "id", "s": "status", "t": "title"}[key]] ^= True
-                    paint()
+                ch = sys.stdin.read(1)
+                if ch == "\033":
+                    # An escape sequence: a mouse report, or a key we do not handle.
+                    seq = _read_escape(sys.stdin)
+                    tab_id = _click_target(seq)
+                    if tab_id:
+                        h.call("tab.focus", {"tab_id": tab_id})
+                        paint()
+                else:
+                    key = ch.lower()
+                    if key == "q":
+                        return 0
+                    if key in ("i", "s", "t"):
+                        cols[{"i": "id", "s": "status", "t": "title"}[key]] ^= True
+                        paint()
                 if stream not in ready:
                     continue
             line = reader.readline()
@@ -300,9 +328,42 @@ def main() -> int:
         return 1
     finally:
         if saved is not None:
+            sys.stdout.write(MOUSE_OFF)
+            sys.stdout.flush()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
         stream.close()
     return 0
+
+
+def _read_escape(stream) -> str:
+    """Read the rest of an escape sequence. SGR mouse ends in M (press) or m (release)."""
+    seq = ""
+    for _ in range(32):                       # bounded: never block on a lone ESC
+        r, _, _ = select.select([stream], [], [], 0.05)
+        if not r:
+            break
+        c = stream.read(1)
+        seq += c
+        if c in "Mm~" or (seq.startswith("[") and c.isalpha() and c not in "<"):
+            break
+    return seq
+
+
+def _click_target(seq: str) -> str | None:
+    """Resolve an SGR mouse press into the tab_id on that screen row.
+
+    SGR format is ESC [ < button ; col ; row M  (press) or m (release). Only button 0
+    presses count — a release would fire the same tab twice, and scroll buttons are 64+.
+    """
+    if not seq.startswith("[<") or not seq.endswith("M"):
+        return None
+    try:
+        button, _col, row = seq[2:-1].split(";")
+        if int(button) != 0:
+            return None
+        return ROW_TO_TAB.get(int(row))
+    except (ValueError, KeyError):
+        return None
 
 
 def _event_kind(ev: dict) -> str:

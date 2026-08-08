@@ -60,6 +60,15 @@ Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
 
 Run it in a pane and it behaves like a panel — it clears and repaints on each event.
 
+## Click to switch
+
+Clicking a row focuses that tab. herdr forwards mouse events to a pane app that requests
+them — its own config says so of `lazygit` and `btop` — so the navigator turns on SGR mouse
+reporting (`\033[?1006h`) and resolves the clicked screen row back to a `tab_id`, then calls
+`tab.focus`.
+
+Only button-0 presses count: a release would fire the same tab twice, and scroll is 64+.
+
 ## Choosing columns
 
 Three fields, each toggleable live or from the command line:
