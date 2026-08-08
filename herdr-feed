@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live, workspace-scoped agent view for herdr.
+"""herdr-feed — a live, workspace-scoped agent feed for herdr.
 
 herdr 0.7.4's socket API has no view/filter concept — the complete `agent.*` surface is
 explain/focus/get/list/read/rename/send/start, and `agent.list` takes EmptyParams. So a
@@ -11,10 +11,12 @@ This subscribes to the events that change the answer, re-reads `agent.list` when
 arrives, and prints only the agents in the focused workspace. No polling.
 
 Usage:
-    herdr-workspace-agents                 # follow the focused workspace
-    herdr-workspace-agents --workspace wY  # pin to one workspace
-    herdr-workspace-agents --once          # print once and exit
-    herdr-workspace-agents --plain         # no ANSI, for piping
+    herdr-feed                 # follow the focused workspace
+    herdr-feed --workspace wY  # pin to one workspace
+    herdr-feed --once          # print once and exit
+    herdr-feed --plain         # no ANSI, for piping
+
+Live keys: [i] pane id  [s] status  [t] title  [q] quit
 
 Verified against herdr 0.7.4. If `events.subscribe` returns an error naming a missing
 field, the Subscription shape changed: run `herdr api schema --json` and check which
@@ -30,6 +32,8 @@ import select
 import shutil
 import socket
 import sys
+import termios
+import tty
 
 # herdr has no subscribable agent.* event: the Subscription enum covers workspace.*,
 # worktree.*, tab.*, pane.* and layout.updated only, and the per-pane variants need a
@@ -122,7 +126,7 @@ def _walk_lists(obj, key):
     return []
 
 
-def render(h: Herdr, ws_id: str | None, plain: bool) -> str:
+def render(h: Herdr, ws_id: str | None, plain: bool, cols: dict) -> str:
     if ws_id is None:
         return "workspace: COULD-NOT-READ — showing nothing rather than everything"
 
@@ -155,12 +159,26 @@ def render(h: Herdr, ws_id: str | None, plain: bool) -> str:
         # The full pane id (workspace included) and the status are identifiers, not prose.
         # They are never dropped to save room — only the title is truncated, because it is
         # the only field you can still act without.
-        prefix = f" {glyph} {pane:<7} {status:<7} "
-        row = prefix + _fit_title(name, max(4, width - len(prefix)))
+        prefix = f" {glyph} "
+        if cols["id"]:
+            prefix += f"{pane:<7} "
+        if cols["status"]:
+            prefix += f"{status:<7} "
+        body = _fit_title(name, max(4, width - len(prefix))) if cols["title"] else ""
+        row = (prefix + body).rstrip()
         lines.append(row if plain else f"{colour}{row}{RESET}")
         if status == "blocked":
             lines.append(_fit("      ^ waiting on you", width))
     return "\n".join(lines)
+
+
+def footer(cols: dict, plain: bool, width: int) -> str:
+    """The two toggles, always visible, so the panel documents its own controls."""
+    def mark(on: bool) -> str:
+        return "on " if on else "off"
+    txt = f" [i] id {mark(cols['id'])}  [s] status {mark(cols['status'])}  [q] quit"
+    txt = _fit(txt, width)
+    return txt if plain else f"\033[7m{txt}\033[0m"
 
 
 def _fit(text: str, width: int) -> str:
@@ -197,11 +215,16 @@ def _fit_title(title: str, width: int) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Live workspace-scoped agent view for herdr.")
+    ap = argparse.ArgumentParser(prog="herdr-feed", description="Live workspace-scoped agent feed for herdr.")
     ap.add_argument("--workspace", help="pin to this workspace id instead of following focus")
     ap.add_argument("--once", action="store_true", help="print once and exit")
     ap.add_argument("--plain", action="store_true", help="no ANSI colour")
+    ap.add_argument("--no-id", action="store_true", help="start with the pane id hidden")
+    ap.add_argument("--no-status", action="store_true", help="start with the status hidden")
+    ap.add_argument("--no-title", action="store_true", help="start with the title hidden")
     args = ap.parse_args()
+
+    cols = {"id": not args.no_id, "status": not args.no_status, "title": not args.no_title}
 
     h = Herdr()
     try:
@@ -215,7 +238,7 @@ def main() -> int:
     ws = pinned or focused_workspace(h)
 
     if args.once:
-        print(render(h, ws, args.plain))
+        print(render(h, ws, args.plain, cols))
         return 0
 
     stream = h.subscribe(SUBSCRIPTIONS)
@@ -224,17 +247,41 @@ def main() -> int:
     def paint():
         # \033[H\033[J — home + clear, so the pane behaves like a live panel
         sys.stdout.write("" if args.plain else "\033[H\033[J")
-        print(render(h, ws, args.plain), flush=True)
+        w = shutil.get_terminal_size(fallback=(80, 24)).columns
+        print(render(h, ws, args.plain, cols), flush=True)
+        if interactive:
+            print(footer(cols, args.plain, w), end="", flush=True)
+
+    # Raw mode lets a single keypress toggle a column. Only when stdin is a real tty —
+    # piped or redirected, the flags are the whole interface.
+    interactive = sys.stdin.isatty() and not args.once
+    saved = None
+    if interactive:
+        try:
+            saved = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except (termios.error, ValueError):
+            interactive = False
 
     paint()
     try:
         while True:
-            # Block on the event stream, but wake on the fallback so anything herdr does
-            # not emit an event for (agent renames, notably) still converges.
-            ready, _, _ = select.select([stream], [], [], FALLBACK_REPAINT_SECONDS)
+            # Block on the event stream and the keyboard together, waking on the fallback
+            # so anything herdr emits no event for (agent renames) still converges.
+            watch = [stream] + ([sys.stdin] if interactive else [])
+            ready, _, _ = select.select(watch, [], [], FALLBACK_REPAINT_SECONDS)
             if not ready:
                 paint()
                 continue
+            if interactive and sys.stdin in ready:
+                key = sys.stdin.read(1).lower()
+                if key == "q":
+                    return 0
+                if key in ("i", "s", "t"):
+                    cols[{"i": "id", "s": "status", "t": "title"}[key]] ^= True
+                    paint()
+                if stream not in ready:
+                    continue
             line = reader.readline()
             if not line:
                 print("\nevent stream ended", file=sys.stderr)
@@ -255,6 +302,8 @@ def main() -> int:
         print(f"\nevent stream closed: {exc}", file=sys.stderr)
         return 1
     finally:
+        if saved is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
         stream.close()
     return 0
 

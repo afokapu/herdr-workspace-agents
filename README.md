@@ -1,4 +1,4 @@
-# herdr-workspace-agents
+# herdr-feed
 
 A live, workspace-scoped agent view for [herdr](https://herdr.dev).
 
@@ -39,7 +39,7 @@ when one arrives, and prints only the focused workspace. **No polling.**
 
 ```sh
 git clone https://github.com/afokapu/herdr-workspace-agents
-install -m755 herdr-workspace-agents/herdr-workspace-agents ~/.local/bin/
+install -m755 herdr-workspace-agents/herdr-feed ~/.local/bin/
 ```
 
 Requires Python 3.10+ and a running herdr. No dependencies.
@@ -47,15 +47,28 @@ Requires Python 3.10+ and a running herdr. No dependencies.
 ## Use
 
 ```sh
-herdr-workspace-agents                 # follow the focused workspace, live
-herdr-workspace-agents --workspace wY  # pin to one workspace
-herdr-workspace-agents --once          # print once and exit
-herdr-workspace-agents --plain         # no ANSI, for piping
+herdr-feed                 # follow the focused workspace, live
+herdr-feed --workspace wY  # pin to one workspace
+herdr-feed --once          # print once and exit
+herdr-feed --plain         # no ANSI, for piping
 ```
 
 Set `HERDR_SOCK` if your socket is not at `~/.config/herdr/herdr.sock`.
 
 Run it in a pane and it behaves like a panel — it clears and repaints on each event.
+
+## Choosing columns
+
+Three fields, each toggleable live or from the command line:
+
+```
+[i] pane id     [s] status     [t] title     [q] quit
+```
+
+The toggles are shown in a footer at the bottom of the pane, so the panel documents its own
+controls. To start with a column hidden: `--no-id`, `--no-status`, `--no-title`.
+
+Keys need a tty. Piped or redirected, the flags are the whole interface.
 
 ## Status glyphs
 
